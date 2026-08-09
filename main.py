@@ -35,37 +35,64 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف المعمل والملفات! 📚🤖\n"
-        "• البوت يسحب الكتب وينسخها من القناة تلقائياً ويحفظها في الأرشيف الدائم.\n"
-        "• أرسل اسم الكتاب نصياً للبحث عنه واسترجاعه فوراً."
+        "• لحفظ الكتب: قم بتحويلها (Forward) من القناة إلى هنا.\n"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) أو (أريد رواية [اسم الرواية]) وسأحضره لك فوراً."
     )
 
-# دالة الاستماع للمنشورات الجديدة في القناة وحفظها تلقائياً
-async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.channel_post
-    if message:
-        document = message.document or message.video or message.audio
-        if document:
-            file_id = document.file_id
-            file_name = document.file_name or message.caption or "Unknown_File"
-            
-            # حفظ الملف في قاعدة البيانات الدائمة في الـ Volume
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
+# دالة استقبال وحفظ الملفات (سواء أرسلتها مباشرة أو حولتها من القناة)
+async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.message
+    document = message.document or message.video or message.audio
+    
+    if document:
+        file_id = document.file_id
+        file_name = document.file_name or "Unknown_File"
+        
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM files WHERE file_id = ?", (file_id,))
+        exists = cursor.fetchone()
+        
+        if not exists:
             cursor.execute(
                 "INSERT INTO files (file_name, file_id, file_type) VALUES (?, ?, ?)",
                 (file_name, file_id, "document")
             )
             conn.commit()
             conn.close()
+            await message.reply_text(f"✅ تم حفظ الكتاب في الأرشيف الدائم بنجاح:\n📁 {file_name}")
+        else:
+            conn.close()
+            await message.reply_text("ℹ️ هذا الكتاب موجود مسبقاً في الأرشيف الدائم.")
 
-# دالة البحث واسترجاع الكتب للمستخدمين
+# دالة البحث الذكي (استخراج اسم الكتاب وتجاهل الكلمات الزائدة)
 async def search_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.message.text.strip()
+    text = update.message.text.strip()
     
+    # تنظيف النص وإزالة الكلمات الافتتاحية الشائعة لاستخلاص اسم الكتاب الحقيقي فقط
+    clean_query = text
+    phrases_to_remove = [
+        "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
+        "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب", 
+        "اريد", "أريد", "كتاب", "رواية"
+    ]
+    
+    # ترتيب الكلمات تنازلياً حسب الطول لتجنب الأخطاء في الحذف
+    phrases_to_remove = sorted(phrases_to_remove, key=len, reverse=True)
+    
+    for phrase in phrases_to_remove:
+        if clean_query.startswith(phrase):
+            clean_query = clean_query[len(phrase):].strip()
+            break
+            
+    # إذا لم يبقَ شيء بعد الحذف، نبحث بالنص الأصلي
+    if not clean_query:
+        clean_query = text
+
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # البحث بمرونة عن اسم الكتاب داخل الأرشيف الدائم
-    cursor.execute("SELECT file_name, file_id FROM files WHERE file_name LIKE ?", (f"%{query}%",))
+    # البحث المرن بالاسم المستخلص
+    cursor.execute("SELECT file_name, file_id FROM files WHERE file_name LIKE ?", (f"%{clean_query}%",))
     results = cursor.fetchall()
     conn.close()
     
@@ -73,10 +100,10 @@ async def search_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for file_name, file_id in results:
             await update.message.reply_document(
                 document=file_id, 
-                caption=f"✅ إليك الكتاب المطلوب من الأرشيف الدائم:\n📁 {file_name}"
+                caption=f"✅ إليك المطلوب من الأرشيف الدائم:\n📁 {file_name}"
             )
     else:
-        await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب بهذا الاسم ('{query}') في الأرشيف.")
+        await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
 
 def main():
     init_db()
@@ -85,13 +112,11 @@ def main():
     application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    # التقاط المنشورات الجديدة من القنوات التي يكون البوت مشرفاً فيها
-    application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
-    # البحث في الرسائل الخاصة للمستخدمين
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_file))
+    application.add_handler(MessageHandler(filters.Document.ALL | filters.AUDIO | filters.VIDEO, handle_document))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_file))
 
-    print("بوت الأرشيف المتزامن مع القناة يعمل الآن...")
+    print("بوت الأرشيف الذكي يعمل الآن...")
     application.run_polling()
 
-if __name__ == "__main__":
+if __name__ ==- "__main__":
     main()
