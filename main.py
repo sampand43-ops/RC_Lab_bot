@@ -1,5 +1,6 @@
 import os
 import sqlite3
+import re
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -36,7 +37,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
         "• البوت يسحب الكتب وأجزاءها من القناة تلقائياً.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال جميع أجزائه ومجلداته المتوفرة دفعة واحدة!"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بفلترة وترتيب الأجزاء والمجلدات بالتسلسل وإرسالها فوراً!"
     )
 
 # دالة السحب التلقائي من القناة فور نشر أي كتاب أو جزء جديد
@@ -62,7 +63,41 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             finally:
                 conn.close()
 
-# دالة البحث وجلب جميع الأجزاء والمجلدات وإعادة توجيهها دفعة واحدة
+# قاموس لتحويل الكلمات العربية للأجزاء إلى أرقام لضمان الترتيب التسلسلي الدقيق
+ARABIC_NUM_WORDS = {
+    'الأول': 1, 'اول': 1, '1': 1,
+    'الثاني': 2, 'ثاني': 2, '2': 2,
+    'الثالث': 3, 'ثالث': 3, '3': 3,
+    'الرابع': 4, 'رابع': 4, '4': 4,
+    'الخامس': 5, 'خامس': 5, '5': 5,
+    'السادس': 6, 'سادس': 6, '6': 6,
+    'السابع': 7, 'سابع': 7, '7': 7,
+    'الثامن': 8, 'ثامن': 8, '8': 8,
+    'التاسع': 9, 'تاسع': 9, '9': 9,
+    'العاشر': 10, 'عاشر': 10, '10': 10,
+}
+
+def extract_part_number(filename):
+    # البحث عن كلمات تدل على الجزء أو المجلد يليها رقم أو اسم ترتيبي
+    match = re.search(r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
+    if match:
+        val = match.group(2)
+        if val in ARABIC_NUM_WORDS:
+            return ARABIC_NUM_WORDS[val]
+        val_en = val.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
+        if val_en.isdigit():
+            return int(val_en)
+            
+    # البحث عن رقم في نهاية اسم الملف إذا لم توجد كلمة جزء/مجلد صريحة
+    num_match = re.search(r'[\s\-_]([0-9٠-٩]+)\s*(?:\.pdf|\.epub|\.zip)?$', filename)
+    if num_match:
+        val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
+        if val.isdigit():
+            return int(val)
+            
+    return 9999 # الملفات التي ليس لها جزء محدد تظهر في النهاية
+
+# دالة البحث، الفلترة، الترتيب التسلسلي، وإعادة التوجيه
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -85,18 +120,26 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    # جلب جميع الأجزاء والمجلدات المطابقة لاسم الكتاب (بدون LIMIT 1 لجلب الكل)
+    # جلب كافة النتائج المطابقة لاسم الكتاب
     cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
     results = cursor.fetchall()
     conn.close()
     
     if results:
-        await update.message.reply_text(f"🔍 وجدنا ({len(cols := results)}) نتيجة مطابقة، جاري إرسالها الآن:")
+        # تصفية وترتيب النتائج تصاعدياً بناءً على رقم الجزء أو المجلد المستخرج من الاسم
+        sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
         
-        for book_name, msg_id in results:
+        # اختيار فقط الكتب التي تحتوي على مؤشرات أجزاء/مجلدات أو مطابقة تماماً للمطلوب
+        valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
+        
+        # إذا لم تكن هناك أجزاء مقسمة ووجدنا الكتاب الأساسي فقط، نرسله
+        if not valid_books:
+            valid_books = [sorted_results[0]] # إرسال النتيجة الأولى المطابقة فقط منعاً للعشوائية
+
+        await update.message.reply_text(f"🔍 وجدنا ({len(valid_books)}) جزء/مجلد مطابق، جاري إرسالها بالتسلسل:")
+        
+        for book_name, msg_id in valid_books:
             try:
-                # إعادة توجيه كل جزء أو مجلد على حِدة وبشكل متتالي
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
                     from_chat_id=CHANNEL_ID,
@@ -105,7 +148,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception as e:
                 pass
     else:
-        await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب أو أجزاء تطابق ('{clean_query}') في الأرشيف.")
+        await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف بالشروط المطلوبة.")
 
 def main():
     init_db()
@@ -117,7 +160,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_and_forward))
 
-    print("بوت الأجزاء والتوجيه المتعدد يعمل الآن بكفاءة...")
+    print("بوت فلترة الأجزاء وترتيبها بالتسلسل يعمل بكفاءة...")
     application.run_polling()
 
 if __name__ == "__main__":
