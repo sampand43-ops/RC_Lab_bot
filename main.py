@@ -9,14 +9,14 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# مسار التخزين الدائم على Railway (لا يُحذف أبداً عند تحديث الكود في المستقبل)
+# مسار التخزين الدائم على Railway (لا يُحذف أبداً عند تحديث الكود)
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
-# معرف قناتك الثابت لإعادة التوجيه منها عند الطلب
+# معرف قناتك الثابت
 CHANNEL_ID = -1004395670008
 
 def init_db():
@@ -35,17 +35,15 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• لحفظ أي كتاب: قم بتحويله (Forward) من القناة إلى هنا وسيتم حفظه فوراً.\n"
+        "• البوت يسحب الكتب الجديدة من القناة تلقائياً فور نشرها.\n"
         "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإعادة توجيهه إليك مباشرة من القناة بدون تكرار!"
     )
 
-# دالة مرنة جداً لالتقاط أي ملف مُحول وتخزينه دون شروط معقدة
-async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    
-    # التحقق من أن الرسالة مُحولة وتحتوي على ملف (مستند، فيديو، صوت)
-    if message.forward_date:
-        msg_id = message.forward_from_message_id or message.message_id
+# دالة السحب التلقائي من القناة فور نشر أي كتاب جديد (يجب أن يكون البوت مشرفاً في القناة)
+async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.channel_post
+    if message:
+        msg_id = message.message_id
         document = message.document or message.video or message.audio
         
         if document:
@@ -59,17 +57,12 @@ async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     (book_name, msg_id)
                 )
                 conn.commit()
-                await update.message.reply_text(f"✅ تم ربط الكتاب في الأرشيف بنجاح:\n📁 {book_name}")
             except sqlite3.IntegrityError:
-                await update.message.reply_text("ℹ️ هذا الكتاب مربوط مسبقاً في الأرشيف ولا يمكن تكراره.")
+                pass # الكتاب مسجل مسبقاً، نتجاهله لتجنب التكرار
             finally:
                 conn.close()
-        else:
-            await update.message.reply_text("⚠️ الرسالة المحولة لا تحتوي على ملف (كتاب/مستند).")
-    else:
-        await update.message.reply_text("⚠️ يرجى التأكد من تحويل الرسالة (Forward) من القناة.")
 
-# دالة البحث وإعادة التوجيه المباشر للمستخدم دون تكرار
+# دالة البحث وإعادة التوجيه المباشر للمستخدم
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -118,11 +111,12 @@ def main():
     application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    # التقاط أي رسالة محولة تحتوي على ملف في الخاص
-    application.add_handler(MessageHandler(filters.FORWARDED & filters.ChatType.PRIVATE, handle_forward))
+    # الاستماع التلقائي لمنشورات القناة
+    application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
+    # البحث النصي في الخاص وإعادة التوجيه
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_and_forward))
 
-    print("بوت التوجيه الذكي يعمل الآن بكفاءة مطلقة...")
+    print("بوت السحب التلقائي والتوجيه المباشر يعمل الآن...")
     application.run_polling()
 
 if __name__ == "__main__":
