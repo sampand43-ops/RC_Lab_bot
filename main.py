@@ -37,8 +37,8 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• البوت يسحب الكتب وأجزاءها من القناة تلقائياً.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء والمجلدات بالتسلسل مع فاصل زمني دقيق فوراً!"
+        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب وأجزائها بالتسلسل.\n"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء مباشرة!"
     )
 
 # دالة السحب التلقائي من القناة فور نشر أي كتاب أو جزء جديد
@@ -96,7 +96,7 @@ def extract_part_number(filename):
             
     return 9999
 
-# دالة البحث، الفلترة، الترتيب التسلسلي، وإعادة التوجيه مع فاصل زمني
+# دالة البحث، الفلترة، الترتيب، وإعادة التوجيه (تعمل الآن في الخاص والمجموعات)
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -130,7 +130,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not valid_books:
             valid_books = [sorted_results[0]]
 
-        # إرسال الملفات مع فاصل زمني 0.5 ثانية بين كل ملف والآخر
+        # إرسال الملفات مع فاصل زمني 0.5 ثانية (سواء في الخاص أو الجروب)
         for book_name, msg_id in valid_books:
             try:
                 await context.bot.forward_message(
@@ -138,11 +138,13 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     from_chat_id=CHANNEL_ID,
                     message_id=msg_id
                 )
-                await asyncio.sleep(0.5) # فاصل زمني نصف ثانية بين الملف والآخر
+                await asyncio.sleep(0.5)
             except Exception as e:
                 pass
     else:
-        await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف بالشروط المطلوبة.")
+        # في المجموعات، يفضل أحياناً عدم إزعاج الأعضاء برسالة "لم يتم العثور"، لذا سنرسلها فقط إذا كان في المحادثة الخاصة أو نتركها للكل حسب رغبتك
+        if update.effective_chat.type == 'private':
+            await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
 
 def main():
     init_db()
@@ -152,10 +154,13 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_and_forward))
+    
+    # التعديل هنا: السماح للرسائل النصية بالعمل في الخاص والمجموعات (Groups & Supergroups & Private)
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت التوجيه الصامت والمرتب مع الفاصل الزمني يعمل بكفاءة...")
+    print("بوت التوجيه الذكي (خاص + مجموعات) يعمل الآن بكفاءة...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
+
