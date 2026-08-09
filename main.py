@@ -35,7 +35,8 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف المعمل والملفات! 📚🤖\n"
-        "أرسل أي ملف (كتاب، مستند، إلخ) ليتم حفظه في الأرشيف الدائم."
+        "• أرسل أي ملف (كتاب، مستند) ليتم حفظه في الأرشيف الدائم.\n"
+        "• أو أرسل اسم الكتاب نصياً للبحث عنه واسترجاعه فوراً."
     )
 
 # دالة استقبال الملفات وحفظها في قاعدة البيانات الدائمة
@@ -59,6 +60,26 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         await message.reply_text(f"تم حفظ الملف الآتي في الأرشيف الدائم بنجاح:\n📁 {file_name}")
 
+# دالة البحث عن الملفات عند إرسال اسم الكتاب نصياً
+async def search_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.message.text.strip()
+    
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    # البحث عن الملفات التي تحتوي على النص المدخل
+    cursor.execute("SELECT file_name, file_id FROM files WHERE file_name LIKE ?", (f"%{query}%",))
+    results = cursor.fetchall()
+    conn.close()
+    
+    if results:
+        for file_name, file_id in results:
+            await update.message.reply_document(
+                document=file_id, 
+                caption=f"✅ إليك الملف المطلوب من الأرشيف الدائم:\n📁 {file_name}"
+            )
+    else:
+        await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب بهذا الاسم ('{query}') في الأرشيف.")
+
 def main():
     # تجهيز قاعدة البيانات عند الإقلاع
     init_db()
@@ -71,8 +92,9 @@ def main():
     # ربط الأوامر والدوال
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.Document.ALL | filters.AUDIO | filters.VIDEO, handle_document))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_file))
 
-    print("بوت الأرشيف يعمل الآن ومربوط بالتخزين الدائم...")
+    print("بوت الأرشيف يعمل الآن مع ميزة البحث والتخزين الدائم...")
     application.run_polling()
 
 if __name__ == "__main__":
