@@ -12,12 +12,11 @@ channel_books_archive = {}
 
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
-  if message.chat.type != "private":
-    return
+  # يعمل في الخاص أو المجموعة بشكل طبيعي
   bot.reply_to(
       message,
-      "أهلاً بك يا هندسة! 🚀\nهذا البوت يسحب الكتب مباشرة من القناة.\nللطلب أرسل:"
-      " (اريد كتاب + اسم الكتاب).",
+      "أهلاً بك يا هندسة! 🚀\nهذا البوت يسحب الكتب مباشرة من القناة سواء هنا"
+      " أو في المجموعات.\nللطلب أرسل: (اريد كتاب + اسم الكتاب).",
   )
 
 
@@ -37,12 +36,9 @@ def archive_from_channel(message):
     )
 
 
-# 2. الاستماع لطلبات الكتب وإرسالها مباشرة من القناة للمستخدم
+# 2. الاستماع لطلبات الكتب في الخاص والمجموعات وإرسالها مباشرة
 @bot.message_handler(func=lambda message: True)
 def handle_book_requests(message):
-  if message.chat.type != "private":
-    return
-
   text = message.text
   if not text or text.startswith("/"):
     return
@@ -56,6 +52,10 @@ def handle_book_requests(message):
       query = query.replace(prefix, "").strip()
       break
 
+  # إذا لم يكن هناك استعلام بعد الكلمات المفتاحية، نتجاهل الرسالة
+  if not query or query == text_lower:
+    return
+
   # البحث عن الكتاب في أرشيف القناة
   found_msg_id = None
   found_name = None
@@ -67,7 +67,7 @@ def handle_book_requests(message):
 
   if found_msg_id:
     try:
-      # إرسال الكتاب مباشرة عن طريق تحويله من القناة إلى المستخدم
+      # إرسال الكتاب عن طريق توجيهه إلى مكان الطلب (سواء خاص أو مجموعة)
       bot.forward_message(
           chat_id=message.chat.id,
           from_chat_id=CHANNEL_ID,
@@ -76,14 +76,13 @@ def handle_book_requests(message):
     except Exception as e:
       bot.reply_to(
           message,
-          "❌ حدث خطأ أثناء محاولة جلب الكتاب من القناة. تأكد أن البوت مشرف"
-          " فيها.",
+          "❌ حدث خطأ أثناء محاولة جلب الكتاب. تأكد أن البوت مشرف في القناة.",
       )
   else:
+    # الاختيار هنا: يمكنك ترك البوت يرد أو يتجاهل الطلب إذا لم يجد الكتاب في المجموعات لكي لا يزعج الأعضاء
     bot.reply_to(
         message,
-        f"❌ عذراً، لم يتم العثور على كتاب بهذا الاسم ('{query}') في أرشيف"
-        " القناة.",
+        f"❌ عذراً، لم يتم العثور على كتاب بهذا الاسم ('{query}') في الأرشيف.",
     )
 
 
