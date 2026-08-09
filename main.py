@@ -9,22 +9,24 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# مسار التخزين الدائم على Railway
+# مسار التخزين الدائم على Railway (لا يُحذف أبداً عند تحديث الكود في المستقبل)
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
+# معرف قناتك الثابت
+CHANNEL_ID = -1004395670008
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
-        CREATE TABLE IF NOT EXISTS files (
+        CREATE TABLE IF NOT EXISTS archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_name TEXT,
-            file_id TEXT UNIQUE,
-            file_type TEXT
+            book_name TEXT,
+            msg_id INTEGER UNIQUE
         )
     """)
     conn.commit()
@@ -32,34 +34,40 @@ def init_db():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "أهلاً بك يا هندسة في بوت أرشيف المعمل والملفات! 📚🤖\n"
-        "• لحفظ الكتب: قم بتحويلها (Forward) من القناة إلى هنا (لن يتم تكرار حفظ الملفات المتطابقة).\n"
-        "• للبحث: اكتب اسم الكتاب وسأرسل لك نسخة واحدة فريدة منه فوراً."
+        "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
+        "• لحفظ أي كتاب: قم بتحويله (Forward) من القناة إلى هنا (سيتم حفظ اسم ورقم الرسالة فقط).\n"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإعادة توجيهه إليك مباشرة من القناة بدون تكرار!"
     )
 
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# دالة ربط الكتب المحولة من القناة (تخزين الاسم ورقم الرسالة فقط بدون حفظ الملف محلياً)
+async def handle_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
-    document = message.document or message.video or message.audio
     
-    if document:
-        file_id = document.file_id
-        file_name = document.file_name or "Unknown_File"
+    if message.forward_from_chat and message.forward_from_chat.id == CHANNEL_ID:
+        msg_id = message.forward_from_message_id
+        document = message.document or message.video or message.audio
         
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        try:
-            cursor.execute(
-                "INSERT INTO files (file_name, file_id, file_type) VALUES (?, ?, ?)",
-                (file_name, file_id, "document")
-            )
-            conn.commit()
-            await message.reply_text(f"✅ تم حفظ الكتاب في الأرشيف الدائم بنجاح:\n📁 {file_name}")
-        except sqlite3.IntegrityError:
-            await message.reply_text("ℹ️ هذا الملف موجود مسبقاً في الأرشيف ولا يمكن تكراره.")
-        finally:
-            conn.close()
+        if document:
+            book_name = document.file_name or message.caption or "Unknown_Book"
+            
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "INSERT INTO archive (book_name, msg_id) VALUES (?, ?)",
+                    (book_name, msg_id)
+                )
+                conn.commit()
+                await update.message.reply_text(f"✅ تم ربط الكتاب في الأرشيف بنجاح:\n📁 {book_name}")
+            except sqlite3.IntegrityError:
+                await update.message.reply_text("ℹ️ هذا الكتاب مربوط مسبقاً في الأرشيف ولا يمكن تكراره.")
+            finally:
+                conn.close()
+    else:
+        await update.message.reply_text("⚠️ يرجى التحويل حصراً من قناة مجتمع القراءة المعتمدة.")
 
-async def search_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# دالة البحث وإعادة التوجيه المباشر للمستخدم دون تكرار
+async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
     clean_query = text
@@ -81,17 +89,22 @@ async def search_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # جلب النتائج مع استخدام DISTINCT و GROUP BY على file_id لمنع جلب الملفات المكررة نهائياً
-    cursor.execute("SELECT file_name, file_id FROM files WHERE file_name LIKE ? GROUP BY file_id LIMIT 1", (f"%{clean_query}%",))
+    # جلب نتيجة واحدة فريدة حصراً بناءً على رقم الرسالة لمنع أي تكرار
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id LIMIT 1", (f"%{clean_query}%",))
     result = cursor.fetchone()
     conn.close()
     
     if result:
-        file_name, file_id = result
-        await update.message.reply_document(
-            document=file_id, 
-            caption=f"✅ إليك المطلوب من الأرشيف الدائم:\n📁 {file_name}"
-        )
+        book_name, msg_id = result
+        try:
+            # إعادة توجيه الرسالة الأصلية من القناة مباشرة للمستخدم
+            await context.bot.forward_message(
+                chat_id=update.effective_chat.id,
+                from_chat_id=CHANNEL_ID,
+                message_id=msg_id
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ عذراً، لم يتم العثور على الرسالة الأصلية في القناة أو حدث خطأ بالتوجيه.")
     else:
         await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
 
@@ -102,10 +115,10 @@ def main():
     application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.Document.ALL | filters.AUDIO | filters.VIDEO, handle_document))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_file))
+    application.add_handler(MessageHandler(filters.FORWARDED & (filters.Document.ALL | filters.AUDIO | filters.VIDEO) & filters.ChatType.PRIVATE, handle_forward))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_and_forward))
 
-    print("بوت الأرشيف الذكي (بدون تكرار) يعمل الآن...")
+    print("بوت التوجيه الذكي من القناة يعمل الآن بكفاءة...")
     application.run_polling()
 
 if __name__ == "__main__":
