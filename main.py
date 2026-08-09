@@ -64,6 +64,6 @@ def handle_book_requests(message):
         pass
 
 
-if name == "main":
+if  name  == "  main  ":
   print("البوت يعمل الآن ببساطة...")
   bot.infinity_polling()
