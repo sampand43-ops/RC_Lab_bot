@@ -9,14 +9,14 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# مسار التخزين الدائم على Railway
+# مسار التخزين الدائم على Railway (لا يُحذف أبداً عند تحديث الكود)
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
-# تهيئة قاعدة البيانات لحفظ الملفات بشكل دائم
+# تهيئة قاعدة البيانات الدائمة
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -35,38 +35,36 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف المعمل والملفات! 📚🤖\n"
-        "• أرسل أي ملف (كتاب، مستند) ليتم حفظه في الأرشيف الدائم.\n"
-        "• أو أرسل اسم الكتاب نصياً للبحث عنه واسترجاعه فوراً."
+        "• البوت يسحب الكتب وينسخها من القناة تلقائياً ويحفظها في الأرشيف الدائم.\n"
+        "• أرسل اسم الكتاب نصياً للبحث عنه واسترجاعه فوراً."
     )
 
-# دالة استقبال الملفات وحفظها في قاعدة البيانات الدائمة
-async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    document = message.document or message.video or message.audio
-    
-    if document:
-        file_id = document.file_id
-        file_name = document.file_name or "Unknown_File"
-        
-        # حفظ بيانات الملف في قاعدة البيانات الموجودة في Volume
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO files (file_name, file_id, file_type) VALUES (?, ?, ?)",
-            (file_name, file_id, "document")
-        )
-        conn.commit()
-        conn.close()
-        
-        await message.reply_text(f"تم حفظ الملف الآتي في الأرشيف الدائم بنجاح:\n📁 {file_name}")
+# دالة الاستماع للمنشورات الجديدة في القناة وحفظها تلقائياً
+async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.channel_post
+    if message:
+        document = message.document or message.video or message.audio
+        if document:
+            file_id = document.file_id
+            file_name = document.file_name or message.caption or "Unknown_File"
+            
+            # حفظ الملف في قاعدة البيانات الدائمة في الـ Volume
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute(
+                "INSERT INTO files (file_name, file_id, file_type) VALUES (?, ?, ?)",
+                (file_name, file_id, "document")
+            )
+            conn.commit()
+            conn.close()
 
-# دالة البحث عن الملفات عند إرسال اسم الكتاب نصياً
+# دالة البحث واسترجاع الكتب للمستخدمين
 async def search_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.message.text.strip()
     
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # البحث عن الملفات التي تحتوي على النص المدخل
+    # البحث بمرونة عن اسم الكتاب داخل الأرشيف الدائم
     cursor.execute("SELECT file_name, file_id FROM files WHERE file_name LIKE ?", (f"%{query}%",))
     results = cursor.fetchall()
     conn.close()
@@ -75,26 +73,24 @@ async def search_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         for file_name, file_id in results:
             await update.message.reply_document(
                 document=file_id, 
-                caption=f"✅ إليك الملف المطلوب من الأرشيف الدائم:\n📁 {file_name}"
+                caption=f"✅ إليك الكتاب المطلوب من الأرشيف الدائم:\n📁 {file_name}"
             )
     else:
         await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب بهذا الاسم ('{query}') في الأرشيف.")
 
 def main():
-    # تجهيز قاعدة البيانات عند الإقلاع
     init_db()
     
-    # التوكن الخاص بك
     TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
-    
     application = ApplicationBuilder().token(TOKEN).build()
 
-    # ربط الأوامر والدوال
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.Document.ALL | filters.AUDIO | filters.VIDEO, handle_document))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_file))
+    # التقاط المنشورات الجديدة من القنوات التي يكون البوت مشرفاً فيها
+    application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
+    # البحث في الرسائل الخاصة للمستخدمين
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_file))
 
-    print("بوت الأرشيف يعمل الآن مع ميزة البحث والتخزين الدائم...")
+    print("بوت الأرشيف المتزامن مع القناة يعمل الآن...")
     application.run_polling()
 
 if __name__ == "__main__":
