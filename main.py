@@ -1,17 +1,27 @@
 import os
 import telebot
 
-# بيانات البوت والقناة المباشرة (التوكن الجديد)
+# بيانات البوت والقناة
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 CHANNEL_ID = "@ReadingCommunity_Library"
 
 bot = telebot.TeleBot(TOKEN)
 
-# قاموس بسيط لتخزين الأرشيف (اسم الكتاب -> معرف الرسالة في القناة)
+# قاموس لتخزين الأرشيف
 CHANNEL_BOOKS = {}
 
 
-# 1. أرشفة تلقائية لكل ما ينزل في قناتك الخاصة (البوت مشرف هنا)
+# 1. أمر البداية للتأكد من أن البوت حي ويستجيب
+@bot.message_handler(commands=["start"])
+def send_welcome(message):
+  bot.reply_to(
+      message,
+      "أهلاً بك! بوت مكتبة Reading Community يعمل الآن وجاهز لتلبية طلباتكم"
+      " بالبحث عن الكتب.",
+  )
+
+
+# 2. أرشفة تلقائية لكل ما ينزل في قناتك الخاصة
 @bot.channel_post_handler(func=lambda message: True)
 def archive_channel_books(message):
   text = message.text or message.caption
@@ -22,7 +32,7 @@ def archive_channel_books(message):
     CHANNEL_BOOKS[first_line] = message.message_id
 
 
-# 2. الاستماع لطلبات الأعضاء (في المجموعة يكفي أن يكون عضواً عادياً وفي الخاص)
+# 3. الاستماع لطلبات الأعضاء
 @bot.message_handler(func=lambda message: True)
 def handle_book_requests(message):
   text = message.text
@@ -31,7 +41,6 @@ def handle_book_requests(message):
 
   text_lower = text.strip().lower()
 
-  # التحقق من الكلمات المفتاحية المطلوبة
   prefix = None
   if text_lower.startswith("اريد كتاب"):
     prefix = "اريد كتاب"
@@ -39,11 +48,11 @@ def handle_book_requests(message):
     prefix = "اريد رواية"
 
   if prefix:
-    # استخراج اسم الكتاب المكتوب بعد الجملة
     book_name = text_lower.replace(prefix, "").strip()
 
     if not book_name:
-      return  # إذا لم يكتب اسم الكتاب، لا تفعل شيئاً
+      bot.reply_to(message, "يرجى كتابة اسم الكتاب بعد الطلب.")
+      return
 
     # البحث في الأرشيف
     found_msg_id = None
@@ -52,7 +61,6 @@ def handle_book_requests(message):
         found_msg_id = msg_id
         break
 
-    # إذا وجدنا الكتاب نقوم بتحويله، وإذا لم نجد لا نرسل أي شيء نهائياً
     if found_msg_id:
       try:
         bot.forward_message(
@@ -61,7 +69,16 @@ def handle_book_requests(message):
             message_id=found_msg_id,
         )
       except Exception as e:
-        pass
+        bot.reply_to(
+            message, "حدث خطأ أثناء محاولة إرسال الكتاب من القناة."
+        )
+    else:
+      # إشارة واضحة بأن البوت يعمل لكن الكتاب غير موجود في الأرشيف حالياً
+      bot.reply_to(
+          message,
+          f"عذراً، لم أجد كتاباً بهذا الاسم ('{book_name}') في أرشيف القناة"
+          " بعد.",
+      )
 
 
 if name == "main":
