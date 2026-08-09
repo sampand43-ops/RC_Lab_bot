@@ -1,121 +1,57 @@
 import os
 import sqlite3
-import telebot
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 
-TOKEN = os.getenv("TOKEN", "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8")
-CHANNEL_ID = "@ReadingCommunity_Library"  # ضع معرف قناتك هنا
+# تحديد مسار قاعدة البيانات داخل المجلد الدائم Volume
+DATA_DIR = "/app/data"
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
 
-bot = telebot.TeleBot(TOKEN)
+DB_PATH = os.path.join(DATA_DIR, "bot_database.db")
 
-# --- تحديد مسار تخزين دائم على Railway ---
-# نتحقق من وجود مسار Volume مخصص لكي لا تُحذف القاعدة عند إعادة البناء
-if os.path.exists("/app/data"):
-  DB_PATH = "/app/data/books_archive.db"
-elif os.path.exists("/data"):
-  DB_PATH = "/data/books_archive.db"
-else:
-  DB_PATH = "books_archive.db"  # للتشغيل التجريبي المحلي على جهازك
-
-
-# --- إعداد قاعدة البيانات ---
+# تهيئة قاعدة البيانات SQLite
 def init_db():
-  conn = sqlite3.connect(DB_PATH)
-  cursor = conn.cursor()
-  cursor.execute("""
-        CREATE TABLE IF NOT EXISTS books (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            file_name TEXT UNIQUE,
-            msg_id INTEGER
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT
         )
     """)
-  conn.commit()
-  conn.close()
-
-
-init_db()
-
-
-def add_book_to_db(file_name, msg_id):
-  conn = sqlite3.connect(DB_PATH)
-  cursor = conn.cursor()
-  try:
-    cursor.execute(
-        "INSERT OR IGNORE INTO books (file_name, msg_id) VALUES (?, ?)",
-        (file_name, msg_id),
-    )
     conn.commit()
-  except Exception as e:
-    print(f"خطأ في حفظ الكتاب بقاعدة البيانات: {e}")
-  finally:
     conn.close()
 
+# أمر البدء /start
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    
+    # حفظ المستخدم في قاعدة البيانات الدائمة
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("INSERT OR IGNORE INTO users (user_id, username) VALUES (?, ?)", 
+                   (user.id, user.username))
+    conn.commit()
+    conn.close()
 
-def search_book_in_db(query):
-  conn = sqlite3.connect(DB_PATH)
-  cursor = conn.cursor()
-  cursor.execute(
-      "SELECT file_name, msg_id FROM books WHERE file_name LIKE ?",
-      (f"%{query}%",),
-  )
-  result = cursor.fetchone()
-  conn.close()
-  return result
-
-
-@bot.message_handler(commands=["start"])
-def send_welcome(message):
-  bot.reply_to(
-      message,
-      "أهلاً بك يا هندسة! 🚀\nالبوت متصل بالمجلد الدائم ولن تُفقد الملفات حتى"
-      " عند تعديل الدوال أو إعادة البناء.\nللطلب أرسل: (اريد كتاب + اسم الكتاب).",
-  )
-
-
-@bot.channel_post_handler(content_types=["document"])
-def archive_from_channel(message):
-  if message.document and message.document.file_name:
-    file_name = message.document.file_name
-    msg_id = message.message_id
-    add_book_to_db(file_name, msg_id)
-    print(f"✅ تم حفظ الكتاب في المجلد الدائم: {file_name} (ID: {msg_id})")
-
-
-@bot.message_handler(func=lambda message: True)
-def handle_book_requests(message):
-  text = message.text
-  if not text or text.startswith("/"):
-    return
-
-  text_lower = text.strip().lower()
-  query = text_lower
-  for prefix in ["اريد كتاب", "أريد كتاب", "اريد رواية", "أريد رواية"]:
-    if query.startswith(prefix):
-      query = query.replace(prefix, "").strip()
-      break
-
-  if not query or query == text_lower:
-    return
-
-  book_result = search_book_in_db(query)
-
-  if book_result:
-    found_name, found_msg_id = book_result
-    try:
-      bot.forward_message(
-          chat_id=message.chat.id,
-          from_chat_id=CHANNEL_ID,
-          message_id=found_msg_id,
-      )
-    except Exception as e:
-      bot.reply_to(
-          message,
-          "❌ حدث خطأ أثناء محاولة جلب الكتاب. تأكد أن البوت مشرف في القناة.",
-      )
-  else:
-    bot.reply_to(
-        message,
-        f"❌ عذراً، لم يتم العثور على كتاب بهذا الاسم ('{query}') في الأرشيف.",
+    await update.message.reply_text(
+        f"أهلاً بك يا هندسة! 🤖\nتم حفظ بياناتك بنجاح في التخزين الدائم على Railway."
     )
 
+def main():
+    # تشغيل قاعدة البيانات أولاً
+    init_db()
+    
+    # ضع توكن البوت هنا أو عبر متغيرات البيئة Environment Variables
+    TOKEN = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+    
+    application = ApplicationBuilder().token(TOKEN).build()
 
-bot.infinity_polling()
+    application.add_handler(CommandHandler("start", start))
+    
+    print("البوت يعمل الآن...")
+    application.run_polling()
+
+if __name__ == "__main__":
+    main()
