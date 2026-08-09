@@ -3,21 +3,20 @@ import sqlite3
 import telebot
 
 TOKEN = os.getenv("TOKEN", "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8")
-CHANNEL_ID = "@ReadingCommunity_Library"  # ضع معرف قناتك هنا
+CHANNEL_ID = "@ReadingCommunity_Library"
 
 bot = telebot.TeleBot(TOKEN)
 
-# --- تحديد مسار تخزين دائم على Railway ---
-# نتحقق من وجود مسار Volume مخصص لكي لا تُحذف القاعدة عند إعادة البناء
+# --- مسار التخزين الدائم للبيانات على Railway ---
 if os.path.exists("/app/data"):
   DB_PATH = "/app/data/books_archive.db"
 elif os.path.exists("/data"):
   DB_PATH = "/data/books_archive.db"
 else:
-  DB_PATH = "books_archive.db"  # للتشغيل التجريبي المحلي على جهازك
+  DB_PATH = "books_archive.db"
 
 
-# --- إعداد قاعدة البيانات ---
+# --- تهيئة قاعدة البيانات ---
 def init_db():
   conn = sqlite3.connect(DB_PATH)
   cursor = conn.cursor()
@@ -45,7 +44,7 @@ def add_book_to_db(file_name, msg_id):
     )
     conn.commit()
   except Exception as e:
-    print(f"خطأ في حفظ الكتاب بقاعدة البيانات: {e}")
+    print(f"خطأ: {e}")
   finally:
     conn.close()
 
@@ -62,38 +61,40 @@ def search_book_in_db(query):
   return result
 
 
+# --- تعديل تجريبي في رسالة الـ start للتأكد من حدوث Redeploy لاحقاً ---
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
   bot.reply_to(
       message,
-      "أهلاً بك يا هندسة! 🚀\nالبوت متصل بالمجلد الدائم ولن تُفقد الملفات حتى"
-      " عند تعديل الدوال أو إعادة البناء.\nللطلب أرسل: (اريد كتاب + اسم الكتاب).",
+      " أهلاً بك يا هندسة! هذا (الكود التجريبي) للتأكد من استقرار قاعدة"
+      " البيانات الدائمة.\nأرسل اسم أي كتاب للبحث عنه.",
   )
 
 
+# --- أرشفة الكتب من القناة ---
 @bot.channel_post_handler(content_types=["document"])
 def archive_from_channel(message):
   if message.document and message.document.file_name:
     file_name = message.document.file_name
     msg_id = message.message_id
     add_book_to_db(file_name, msg_id)
-    print(f"✅ تم حفظ الكتاب في المجلد الدائم: {file_name} (ID: {msg_id})")
+    print(f"✅ تم حفظ الكتاب تجريبياً: {file_name}")
 
 
+# --- استقبال الطلبات والبحث ---
 @bot.message_handler(func=lambda message: True)
 def handle_book_requests(message):
   text = message.text
   if not text or text.startswith("/"):
     return
 
-  text_lower = text.strip().lower()
-  query = text_lower
+  query = text.strip().lower()
   for prefix in ["اريد كتاب", "أريد كتاب", "اريد رواية", "أريد رواية"]:
     if query.startswith(prefix):
       query = query.replace(prefix, "").strip()
       break
 
-  if not query or query == text_lower:
+  if not query:
     return
 
   book_result = search_book_in_db(query)
@@ -108,14 +109,10 @@ def handle_book_requests(message):
       )
     except Exception as e:
       bot.reply_to(
-          message,
-          "❌ حدث خطأ أثناء محاولة جلب الكتاب. تأكد أن البوت مشرف في القناة.",
+          message, "❌ حدث خطأ في جلب الكتاب، تأكد أن البوت مشرف في القناة."
       )
   else:
-    bot.reply_to(
-        message,
-        f"❌ عذراً، لم يتم العثور على كتاب بهذا الاسم ('{query}') في الأرشيف.",
-    )
+    bot.reply_to(message, f"❌ عذراً، الكتاب ('{query}') غير موجود في الأرشيف.")
 
 
 bot.infinity_polling()
