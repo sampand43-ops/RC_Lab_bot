@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import telebot
 
 TOKEN = os.getenv("TOKEN", "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8")
@@ -6,37 +7,76 @@ CHANNEL_ID = "@ReadingCommunity_Library"  # ضع معرف قناتك هنا
 
 bot = telebot.TeleBot(TOKEN)
 
-# قاموس لتخزين اسم الكتاب ومعرف الرسالة الخاص به في القناة
-channel_books_archive = {}
+
+# --- إعداد قاعدة البيانات الدائمة (SQLite) ---
+def init_db():
+  conn = sqlite3.connect("books_archive.db")
+  cursor = conn.cursor()
+  # إنشاء جدول لتخزين اسم الكتاب ورقم الرسالة في القناة
+  cursor.execute("""
+        CREATE TABLE IF NOT EXISTS books (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            file_name TEXT UNIQUE,
+            msg_id INTEGER
+        )
+    """)
+  conn.commit()
+  conn.close()
+
+
+# تشغيل دالة إنشاء القاعدة عند بدء البوت
+init_db()
+
+
+def add_book_to_db(file_name, msg_id):
+  conn = sqlite3.connect("books_archive.db")
+  cursor = conn.cursor()
+  try:
+    cursor.execute(
+        "INSERT OR IGNORE INTO books (file_name, msg_id) VALUES (?, ?)",
+        (file_name, msg_id),
+    )
+    conn.commit()
+  except Exception as e:
+    print(f"خطأ في حفظ الكتاب بقاعدة البيانات: {e}")
+  finally:
+    conn.close()
+
+
+def search_book_in_db(query):
+  conn = sqlite3.connect("books_archive.db")
+  cursor = conn.cursor()
+  # البحث عن تطابق جزئي لاسم الكتاب
+  cursor.execute(
+      "SELECT file_name, msg_id FROM books WHERE file_name LIKE ?",
+      (f"%{query}%",),
+  )
+  result = cursor.fetchone()  # يجلب أول كتاب مطابق
+  conn.close()
+  return result  # يعيد (file_name, msg_id) أو None
 
 
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
-  # يعمل في الخاص أو المجموعة بشكل طبيعي
   bot.reply_to(
       message,
-      "أهلاً بك يا هندسة! 🚀\nهذا البوت يسحب الكتب مباشرة من القناة سواء هنا"
-      " أو في المجموعات.\nللطلب أرسل: (اريد كتاب + اسم الكتاب).",
+      "أهلاً بك يا هندسة! 🚀\nالبوت يعمل الآن بقاعدة بيانات دائمة ولن تضيع"
+      " الكتب عند التحديث.\nللطلب أرسل: (اريد كتاب + اسم الكتاب).",
   )
 
 
-# 1. أرشفة الكتب تلقائياً من القناة (يجب أن يكون البوت مشرفاً في القناة)
+# 1. أرشفة الكتب تلقائياً من القناة وحفظها في قاعدة البيانات فوراً
 @bot.channel_post_handler(content_types=["document"])
 def archive_from_channel(message):
-  file_name = message.document.file_name
-  msg_id = message.message_id
+  if message.document and message.document.file_name:
+    file_name = message.document.file_name
+    msg_id = message.message_id
 
-  if file_name in channel_books_archive:
-    print(f"⚠️ الكتاب ('{file_name}') موجود مسبقاً في أرشيف القناة.")
-  else:
-    channel_books_archive[file_name] = msg_id
-    print(
-        f"✅ تم ربط الكتاب ('{file_name}') من القناة بنجاح (Message ID:"
-        f" {msg_id})"
-    )
+    add_book_to_db(file_name, msg_id)
+    print(f"✅ تم حفظ وتثبيت الكتاب في القاعدة: {file_name} (ID: {msg_id})")
 
 
-# 2. الاستماع لطلبات الكتب في الخاص والمجموعات وإرسالها مباشرة
+# 2. الاستماع لطلبات الكتب في الخاص والمجموعات وإرسالها
 @bot.message_handler(func=lambda message: True)
 def handle_book_requests(message):
   text = message.text
@@ -52,22 +92,15 @@ def handle_book_requests(message):
       query = query.replace(prefix, "").strip()
       break
 
-  # إذا لم يكن هناك استعلام بعد الكلمات المفتاحية، نتجاهل الرسالة
   if not query or query == text_lower:
     return
 
-  # البحث عن الكتاب في أرشيف القناة
-  found_msg_id = None
-  found_name = None
-  for name, msg_id in channel_books_archive.items():
-    if query in name.lower():
-      found_msg_id = msg_id
-      found_name = name
-      break
+  # البحث في قاعدة البيانات الدائمة
+  book_result = search_book_in_db(query)
 
-  if found_msg_id:
+  if book_result:
+    found_name, found_msg_id = book_result
     try:
-      # إرسال الكتاب عن طريق توجيهه إلى مكان الطلب (سواء خاص أو مجموعة)
       bot.forward_message(
           chat_id=message.chat.id,
           from_chat_id=CHANNEL_ID,
@@ -79,7 +112,6 @@ def handle_book_requests(message):
           "❌ حدث خطأ أثناء محاولة جلب الكتاب. تأكد أن البوت مشرف في القناة.",
       )
   else:
-    # الاختيار هنا: يمكنك ترك البوت يرد أو يتجاهل الطلب إذا لم يجد الكتاب في المجموعات لكي لا يزعج الأعضاء
     bot.reply_to(
         message,
         f"❌ عذراً، لم يتم العثور على كتاب بهذا الاسم ('{query}') في الأرشيف.",
