@@ -11,7 +11,7 @@ bot = telebot.TeleBot(TOKEN)
 CHANNEL_BOOKS = {}
 
 
-# 1. أمر البداية للتأكد من أن البوت حي ويستجيب
+# 1. أمر البداية للتأكد من أن البوت يعمل
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
   bot.reply_to(
@@ -21,7 +21,7 @@ def send_welcome(message):
   )
 
 
-# 2. أرشفة تلقائية لكل ما ينزل في قناتك الخاصة
+# 2. أرشفة تلقائية لكل ما ينزل في قناتك الخاصة مع إرسال تنبيه في السجلات
 @bot.channel_post_handler(func=lambda message: True)
 def archive_channel_books(message):
   text = message.text or message.caption
@@ -30,6 +30,8 @@ def archive_channel_books(message):
     CHANNEL_BOOKS[clean_text] = message.message_id
     first_line = clean_text.split("\n")[0]
     CHANNEL_BOOKS[first_line] = message.message_id
+    # تنبيه مؤكد يظهر في Deploy Logs على Railway فور أرشفة الكتاب
+    print(f"✅ تمت أرشفة الكتاب بنجاح في الذاكرة: {first_line}")
 
 
 # 3. الاستماع لطلبات الأعضاء
