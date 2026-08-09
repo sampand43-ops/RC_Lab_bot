@@ -7,12 +7,16 @@ CHANNEL_ID = "@ReadingCommunity_Library"  # ضع معرف قناتك هنا
 
 bot = telebot.TeleBot(TOKEN)
 
+# --- تحديد مسار دائم لقاعدة البيانات على Railway ---
+# إذا وُجد مجلد /data (الخاص بالـ Volume)، سيحفظ القاعدة فيه لتكون دائمة ولا تُحذف عند التحديث
+DATA_DIR = "/data" if os.path.exists("/data") else "."
+DB_PATH = os.path.join(DATA_DIR, "books_archive.db")
 
-# --- إعداد قاعدة البيانات الدائمة (SQLite) ---
+
+# --- إعداد قاعدة البيانات الدائمة ---
 def init_db():
-  conn = sqlite3.connect("books_archive.db")
+  conn = sqlite3.connect(DB_PATH)
   cursor = conn.cursor()
-  # إنشاء جدول لتخزين اسم الكتاب ورقم الرسالة في القناة
   cursor.execute("""
         CREATE TABLE IF NOT EXISTS books (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -24,12 +28,11 @@ def init_db():
   conn.close()
 
 
-# تشغيل دالة إنشاء القاعدة عند بدء البوت
 init_db()
 
 
 def add_book_to_db(file_name, msg_id):
-  conn = sqlite3.connect("books_archive.db")
+  conn = sqlite3.connect(DB_PATH)
   cursor = conn.cursor()
   try:
     cursor.execute(
@@ -44,39 +47,37 @@ def add_book_to_db(file_name, msg_id):
 
 
 def search_book_in_db(query):
-  conn = sqlite3.connect("books_archive.db")
+  conn = sqlite3.connect(DB_PATH)
   cursor = conn.cursor()
-  # البحث عن تطابق جزئي لاسم الكتاب
   cursor.execute(
       "SELECT file_name, msg_id FROM books WHERE file_name LIKE ?",
       (f"%{query}%",),
   )
-  result = cursor.fetchone()  # يجلب أول كتاب مطابق
+  result = cursor.fetchone()
   conn.close()
-  return result  # يعيد (file_name, msg_id) أو None
+  return result
 
 
 @bot.message_handler(commands=["start"])
 def send_welcome(message):
   bot.reply_to(
       message,
-      "أهلاً بك يا هندسة! 🚀\nالبوت يعمل الآن بقاعدة بيانات دائمة ولن تضيع"
-      " الكتب عند التحديث.\nللطلب أرسل: (اريد كتاب + اسم الكتاب).",
+      "أهلاً بك يا هندسة! 🚀\nالبوت مرتبط الآن بمجلد تخزين دائم ولن تُفقد الكتب"
+      " أبداً عند تحديث الكود.\nللطلب أرسل: (اريد كتاب + اسم الكتاب).",
   )
 
 
-# 1. أرشفة الكتب تلقائياً من القناة وحفظها في قاعدة البيانات فوراً
 @bot.channel_post_handler(content_types=["document"])
 def archive_from_channel(message):
   if message.document and message.document.file_name:
     file_name = message.document.file_name
     msg_id = message.message_id
-
     add_book_to_db(file_name, msg_id)
-    print(f"✅ تم حفظ وتثبيت الكتاب في القاعدة: {file_name} (ID: {msg_id})")
+    print(
+        f"✅ تم حفظ وتثبيت الكتاب في القاعدة الدائمة: {file_name} (ID: {msg_id})"
+    )
 
 
-# 2. الاستماع لطلبات الكتب في الخاص والمجموعات وإرسالها
 @bot.message_handler(func=lambda message: True)
 def handle_book_requests(message):
   text = message.text
@@ -84,8 +85,6 @@ def handle_book_requests(message):
     return
 
   text_lower = text.strip().lower()
-
-  # تنظيف النص وحذف كلمات الطلب ليبقى اسم الكتاب الصافي
   query = text_lower
   for prefix in ["اريد كتاب", "أريد كتاب", "اريد رواية", "أريد رواية"]:
     if query.startswith(prefix):
@@ -95,7 +94,6 @@ def handle_book_requests(message):
   if not query or query == text_lower:
     return
 
-  # البحث في قاعدة البيانات الدائمة
   book_result = search_book_in_db(query)
 
   if book_result:
@@ -119,3 +117,4 @@ def handle_book_requests(message):
 
 
 bot.infinity_polling()
+
