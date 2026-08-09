@@ -69,7 +69,6 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def search_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
-    # تنظيف النص وإزالة الكلمات الافتتاحية الشائعة لاستخلاص اسم الكتاب الحقيقي فقط
     clean_query = text
     phrases_to_remove = [
         "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
@@ -77,7 +76,6 @@ async def search_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "اريد", "أريد", "كتاب", "رواية"
     ]
     
-    # ترتيب الكلمات تنازلياً حسب الطول لتجنب الأخطاء في الحذف
     phrases_to_remove = sorted(phrases_to_remove, key=len, reverse=True)
     
     for phrase in phrases_to_remove:
@@ -85,13 +83,11 @@ async def search_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clean_query = clean_query[len(phrase):].strip()
             break
             
-    # إذا لم يبقَ شيء بعد الحذف، نبحث بالنص الأصلي
     if not clean_query:
         clean_query = text
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # البحث المرن بالاسم المستخلص
     cursor.execute("SELECT file_name, file_id FROM files WHERE file_name LIKE ?", (f"%{clean_query}%",))
     results = cursor.fetchall()
     conn.close()
@@ -118,5 +114,6 @@ def main():
     print("بوت الأرشيف الذكي يعمل الآن...")
     application.run_polling()
 
-if __name__ ==- "__main__":
+if __name__ == "__main__":
     main()
+
