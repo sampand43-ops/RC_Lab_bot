@@ -73,7 +73,6 @@ def handle_book_requests(message):
             message, "حدث خطأ أثناء محاولة إرسال الكتاب من القناة."
         )
     else:
-      # إشارة واضحة بأن البوت يعمل لكن الكتاب غير موجود في الأرشيف حالياً
       bot.reply_to(
           message,
           f"عذراً، لم أجد كتاباً بهذا الاسم ('{book_name}') في أرشيف القناة"
@@ -81,6 +80,5 @@ def handle_book_requests(message):
       )
 
 
-if name == "main":
-  print("البوت يعمل الآن ببساطة...")
-  bot.infinity_polling()
+# تشغيل البوت مباشرة
+bot.infinity_polling()
