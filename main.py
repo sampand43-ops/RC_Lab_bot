@@ -9,14 +9,13 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# مسار التخزين الدائم على Railway (لا يُحذف أبداً عند تحديث الكود)
+# مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
-# تهيئة قاعدة البيانات الدائمة
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -24,22 +23,20 @@ def init_db():
         CREATE TABLE IF NOT EXISTS files (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             file_name TEXT,
-            file_id TEXT,
+            file_id TEXT UNIQUE,
             file_type TEXT
         )
     """)
     conn.commit()
     conn.close()
 
-# أمر البدء
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف المعمل والملفات! 📚🤖\n"
-        "• لحفظ الكتب: قم بتحويلها (Forward) من القناة إلى هنا.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) أو (أريد رواية [اسم الرواية]) وسأحضره لك فوراً."
+        "• لحفظ الكتب: قم بتحويلها (Forward) من القناة إلى هنا (لن يتم تكرار حفظ الملفات المتطابقة).\n"
+        "• للبحث: اكتب اسم الكتاب وسأرسل لك نسخة واحدة فريدة منه فوراً."
     )
 
-# دالة استقبال وحفظ الملفات (سواء أرسلتها مباشرة أو حولتها من القناة)
 async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.message
     document = message.document or message.video or message.audio
@@ -50,22 +47,18 @@ async def handle_document(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT id FROM files WHERE file_id = ?", (file_id,))
-        exists = cursor.fetchone()
-        
-        if not exists:
+        try:
             cursor.execute(
                 "INSERT INTO files (file_name, file_id, file_type) VALUES (?, ?, ?)",
                 (file_name, file_id, "document")
             )
             conn.commit()
-            conn.close()
             await message.reply_text(f"✅ تم حفظ الكتاب في الأرشيف الدائم بنجاح:\n📁 {file_name}")
-        else:
+        except sqlite3.IntegrityError:
+            await message.reply_text("ℹ️ هذا الملف موجود مسبقاً في الأرشيف ولا يمكن تكراره.")
+        finally:
             conn.close()
-            await message.reply_text("ℹ️ هذا الكتاب موجود مسبقاً في الأرشيف الدائم.")
 
-# دالة البحث الذكي (استخراج اسم الكتاب وتجاهل الكلمات الزائدة)
 async def search_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -88,16 +81,17 @@ async def search_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT file_name, file_id FROM files WHERE file_name LIKE ?", (f"%{clean_query}%",))
-    results = cursor.fetchall()
+    # جلب النتائج مع استخدام DISTINCT و GROUP BY على file_id لمنع جلب الملفات المكررة نهائياً
+    cursor.execute("SELECT file_name, file_id FROM files WHERE file_name LIKE ? GROUP BY file_id LIMIT 1", (f"%{clean_query}%",))
+    result = cursor.fetchone()
     conn.close()
     
-    if results:
-        for file_name, file_id in results:
-            await update.message.reply_document(
-                document=file_id, 
-                caption=f"✅ إليك المطلوب من الأرشيف الدائم:\n📁 {file_name}"
-            )
+    if result:
+        file_name, file_id = result
+        await update.message.reply_document(
+            document=file_id, 
+            caption=f"✅ إليك المطلوب من الأرشيف الدائم:\n📁 {file_name}"
+        )
     else:
         await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
 
@@ -111,9 +105,8 @@ def main():
     application.add_handler(MessageHandler(filters.Document.ALL | filters.AUDIO | filters.VIDEO, handle_document))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, search_file))
 
-    print("بوت الأرشيف الذكي يعمل الآن...")
+    print("بوت الأرشيف الذكي (بدون تكرار) يعمل الآن...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
-
