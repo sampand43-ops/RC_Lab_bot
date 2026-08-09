@@ -112,9 +112,8 @@ def handle_book_requests(message):
   else:
     bot.reply_to(
         message,
-        f" عذراً، لم يتم العثور على كتاب بهذا الاسم ('{query}') في الأرشيف.",
+        f"❌ عذراً، لم يتم العثور على كتاب بهذا الاسم ('{query}') في الأرشيف.",
     )
 
 
-
-
+bot.infinity_polling()
