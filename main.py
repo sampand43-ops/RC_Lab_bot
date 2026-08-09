@@ -1,8 +1,8 @@
 import os
 import telebot
 
-# بيانات البوت والقناة المباشرة
-TOKEN = "8619586974:AAE9iQg0BBfswqIgBH5do4XSm2HqiiZQWIk"
+# بيانات البوت والقناة المباشرة (التوكن الجديد)
+TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 CHANNEL_ID = "@ReadingCommunity_Library"
 
 bot = telebot.TeleBot(TOKEN)
@@ -64,6 +64,6 @@ def handle_book_requests(message):
         pass
 
 
-if  name  == "  main  ":
+if name == "main":
   print("البوت يعمل الآن ببساطة...")
   bot.infinity_polling()
