@@ -37,7 +37,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
         "• البوت يسحب الكتب وأجزاءها من القناة تلقائياً.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بفلترة وترتيب الأجزاء والمجلدات بالتسلسل وإرسالها فوراً!"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء والمجلدات بالتسلسل فوراً!"
     )
 
 # دالة السحب التلقائي من القناة فور نشر أي كتاب أو جزء جديد
@@ -78,7 +78,6 @@ ARABIC_NUM_WORDS = {
 }
 
 def extract_part_number(filename):
-    # البحث عن كلمات تدل على الجزء أو المجلد يليها رقم أو اسم ترتيبي
     match = re.search(r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
     if match:
         val = match.group(2)
@@ -88,16 +87,15 @@ def extract_part_number(filename):
         if val_en.isdigit():
             return int(val_en)
             
-    # البحث عن رقم في نهاية اسم الملف إذا لم توجد كلمة جزء/مجلد صريحة
     num_match = re.search(r'[\s\-_]([0-9٠-٩]+)\s*(?:\.pdf|\.epub|\.zip)?$', filename)
     if num_match:
         val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val.isdigit():
             return int(val)
             
-    return 9999 # الملفات التي ليس لها جزء محدد تظهر في النهاية
+    return 9999
 
-# دالة البحث، الفلترة، الترتيب التسلسلي، وإعادة التوجيه
+# دالة البحث، الفلترة، الترتيب التسلسلي، وإعادة التوجيه (بدون إرسال رسائل نصية مزعجة)
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -120,24 +118,18 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # جلب كافة النتائج المطابقة لاسم الكتاب
     cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
     results = cursor.fetchall()
     conn.close()
     
     if results:
-        # تصفية وترتيب النتائج تصاعدياً بناءً على رقم الجزء أو المجلد المستخرج من الاسم
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
-        
-        # اختيار فقط الكتب التي تحتوي على مؤشرات أجزاء/مجلدات أو مطابقة تماماً للمطلوب
         valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
         
-        # إذا لم تكن هناك أجزاء مقسمة ووجدنا الكتاب الأساسي فقط، نرسله
         if not valid_books:
-            valid_books = [sorted_results[0]] # إرسال النتيجة الأولى المطابقة فقط منعاً للعشوائية
+            valid_books = [sorted_results[0]]
 
-        await update.message.reply_text(f"🔍 وجدنا ({len(valid_books)}) جزء/مجلد مطابق، جاري إرسالها بالتسلسل:")
-        
+        # إرسال الملفات مباشرة بدون أي رسائل نصية قبلها
         for book_name, msg_id in valid_books:
             try:
                 await context.bot.forward_message(
@@ -160,7 +152,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_and_forward))
 
-    print("بوت فلترة الأجزاء وترتيبها بالتسلسل يعمل بكفاءة...")
+    print("بوت التوجيه الصامت والمرتب يعمل بكفاءة...")
     application.run_polling()
 
 if __name__ == "__main__":
