@@ -9,14 +9,14 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# مسار التخزين الدائم الذي قمنا بإنبرئه وربطه في Railway
+# مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
-# تهيئة قاعدة البيانات لحفظ الملفات والروابط بشكل دائم
+# تهيئة قاعدة البيانات لحفظ الملفات بشكل دائم
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -63,12 +63,9 @@ def main():
     # تجهيز قاعدة البيانات عند الإقلاع
     init_db()
     
-    # قراءة توكن البوت من متغيرات البيئة في Railway
-    TOKEN = os.getenv("BOT_TOKEN")
-    if not TOKEN:
-        print("خطأ: يرجى ضبط متغير البيئة BOT_TOKEN في إعدادات Railway.")
-        return
-
+    # التوكن الخاص بك
+    TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
+    
     application = ApplicationBuilder().token(TOKEN).build()
 
     # ربط الأوامر والدوال
