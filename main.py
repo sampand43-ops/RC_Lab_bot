@@ -7,17 +7,13 @@ CHANNEL_ID = "@ReadingCommunity_Library"  # ضع معرف قناتك هنا
 
 bot = telebot.TeleBot(TOKEN)
 
-# --- تحديد مسار تخزين دائم على Railway ---
-# نتحقق من وجود مسار Volume مخصص لكي لا تُحذف القاعدة عند إعادة البناء
-if os.path.exists("/app/data"):
-  DB_PATH = "/app/data/books_archive.db"
-elif os.path.exists("/data"):
-  DB_PATH = "/data/books_archive.db"
-else:
-  DB_PATH = "books_archive.db"  # للتشغيل التجريبي المحلي على جهازك
+# --- تحديد مسار دائم لقاعدة البيانات على Railway ---
+# إذا وُجد مجلد /data (الخاص بالـ Volume)، سيحفظ القاعدة فيه لتكون دائمة ولا تُحذف عند التحديث
+DATA_DIR = "/data" if os.path.exists("/data") else "."
+DB_PATH = os.path.join(DATA_DIR, "books_archive.db")
 
 
-# --- إعداد قاعدة البيانات ---
+# --- إعداد قاعدة البيانات الدائمة ---
 def init_db():
   conn = sqlite3.connect(DB_PATH)
   cursor = conn.cursor()
@@ -66,8 +62,8 @@ def search_book_in_db(query):
 def send_welcome(message):
   bot.reply_to(
       message,
-      "أهلاً بك يا هندسة! 🚀\nالبوت متصل بالمجلد الدائم ولن تُفقد الملفات حتى"
-      " عند تعديل الدوال أو إعادة البناء.\nللطلب أرسل: (اريد كتاب + اسم الكتاب).",
+      "أهلاً بك يا هندسة! 🚀\nالبوت مرتبط الآن بمجلد تخزين دائم ولن تُفقد الكتب"
+      " أبداً عند تحديث الكود.\nللطلب أرسل: (اريد كتاب + اسم الكتاب).",
   )
 
 
@@ -77,7 +73,9 @@ def archive_from_channel(message):
     file_name = message.document.file_name
     msg_id = message.message_id
     add_book_to_db(file_name, msg_id)
-    print(f"✅ تم حفظ الكتاب في المجلد الدائم: {file_name} (ID: {msg_id})")
+    print(
+        f"✅ تم حفظ وتثبيت الكتاب في القاعدة الدائمة: {file_name} (ID: {msg_id})"
+    )
 
 
 @bot.message_handler(func=lambda message: True)
@@ -119,3 +117,4 @@ def handle_book_requests(message):
 
 
 bot.infinity_polling()
+
