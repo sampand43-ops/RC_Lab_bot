@@ -1,6 +1,7 @@
 import os
 import sqlite3
 import re
+import asyncio
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -37,7 +38,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
         "• البوت يسحب الكتب وأجزاءها من القناة تلقائياً.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء والمجلدات بالتسلسل فوراً!"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء والمجلدات بالتسلسل مع فاصل زمني دقيق فوراً!"
     )
 
 # دالة السحب التلقائي من القناة فور نشر أي كتاب أو جزء جديد
@@ -95,7 +96,7 @@ def extract_part_number(filename):
             
     return 9999
 
-# دالة البحث، الفلترة، الترتيب التسلسلي، وإعادة التوجيه (بدون إرسال رسائل نصية مزعجة)
+# دالة البحث، الفلترة، الترتيب التسلسلي، وإعادة التوجيه مع فاصل زمني
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -129,7 +130,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not valid_books:
             valid_books = [sorted_results[0]]
 
-        # إرسال الملفات مباشرة بدون أي رسائل نصية قبلها
+        # إرسال الملفات مع فاصل زمني 0.5 ثانية بين كل ملف والآخر
         for book_name, msg_id in valid_books:
             try:
                 await context.bot.forward_message(
@@ -137,6 +138,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     from_chat_id=CHANNEL_ID,
                     message_id=msg_id
                 )
+                await asyncio.sleep(0.5) # فاصل زمني نصف ثانية بين الملف والآخر
             except Exception as e:
                 pass
     else:
@@ -152,7 +154,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_and_forward))
 
-    print("بوت التوجيه الصامت والمرتب يعمل بكفاءة...")
+    print("بوت التوجيه الصامت والمرتب مع الفاصل الزمني يعمل بكفاءة...")
     application.run_polling()
 
 if __name__ == "__main__":
