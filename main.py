@@ -1,58 +1,85 @@
+import os
 import telebot
 
-# ضع توكن البوت الخاص بك هنا
-TOKEN = 'YOUR_BOT_TOKEN'
+# استدعاء التوكن (يمكن وضعه مباشرة أو عبر متغيرات البيئة في Railway)
+TOKEN = os.getenv("TOKEN", "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8")
 bot = telebot.TeleBot(TOKEN)
 
-# قاعدة بيانات مؤقتة لتخزين معلومات الكتب (يمكنك استبدالها بقاعدة بيانات حقيقية لاحقاً)
-# المفتاح: اسم الملف أو معرفه، القيمة: file_id الخاص بتليجرام
+# قاموس لتخزين الأرشيف (اسم الملف -> معرف الملف)
 books_archive = {}
 
-# استقبال الملفات في المحادثة الخاصة فقط
-@bot.message_handler(content_types=['document'])
-fcn
+
+# 1. أمر الترحيب للبدء
+@bot.message_handler(commands=["start"])
+def send_welcome(message):
+  if message.chat.type != "private":
+    return
+  bot.reply_to(
+      message,
+      "أهلاً بك يا هندسة! 🚀\nأرسل لي أي ملف كتاب (PDF) في المحادثة الخاصة وسأقوم"
+      " بأرشفته وتخزينه فوراً.\n\nللطلب: فقط أرسل اسم الكتاب أو جزءاً منه وسأرسله"
+      " لك مباشرة.",
+  )
+
+
+# 2. استقبال الملفات، منع التكرار، وإعطاء إشارة نجاح
+@bot.message_handler(content_types=["document"])
 def handle_document(message):
-    # التأكد أن المحادثة خاصة (Private Chat)
-    if message.chat.type != 'private':
-        return
+  if message.chat.type != "private":
+    return
 
-    file_name = message.document.file_name
-    file_id = message.document.file_id
+  file_name = message.document.file_name
+  file_id = message.document.file_id
 
-    # التحقق من تكرار الكتاب
-    if file_name in books_archive:
-        bot.reply_to(message, f"⚠️ الكتاب '{file_name}' موجود مسبقاً في الأرشيف ولم يتم تخزينه مرة أخرى.")
-    else:
-        # تخزين الكتاب
-        books_archive[file_name] = file_id
-        bot.reply_to(message, f"✅ تم إضافة الكتاب '{file_name}' بنجاح إلى الأرشيف!")
+  # التحقق من وجود الكتاب مسبقاً لمنع التكرار
+  if file_name in books_archive:
+    bot.reply_to(
+        message,
+        f"⚠️ الكتاب ('{file_name}') موجود مسبقاً في الأرشيف ولم يتم تخزينه مرة"
+        " أخرى.",
+    )
+    print(f"⚠️ محاولة رفع كتاب مكرر: {file_name}")
+  else:
+    # تخزين الكتاب وإرسال إشارة نجاح في المحادثة وفي الـ Logs
+    books_archive[file_name] = file_id
+    bot.reply_to(
+        message, f"✅ تم إضافة وتخزين الكتاب ('{file_name}') بنجاح في الأرشيف!"
+    )
+    print(f"✅ تمت أرشفة الكتاب بنجاح: {file_name}")
 
-# أمر للبحث عن كتاب وإرساله مباشرة عند طلبه
-@bot.message_handler(commands=['get', 'book', 'بحث'])
-def send_book(message):
-    if message.chat.type != 'private':
-        return
 
-    # استخلاص اسم الكتاب المطلوب بعد الأمر
-    query = message.text.replace('/get', '').replace('/book', '').replace('/بحث', '').strip()
-    
-    if not query:
-        bot.reply_to(message, "الرجاء كتابة اسم الكتاب مع الأمر، مثال:\n/book python_guide.pdf", parse_mode='Markdown')
-        return
+# 3. البحث عن الكتاب وإرساله مباشرة عند طلبه
+@bot.message_handler(func=lambda message: True)
+def handle_book_requests(message):
+  if message.chat.type != "private":
+    return
 
-    # البحث عن الكتاب في الأرشيف
-    found_file_id = None
-    found_name = None
-    for name, fid in books_archive.items():
-        if query.lower() in name.lower():
-            found_file_id = fid
-            found_name = name
-            break
+  text = message.text
+  if not text or text.startswith("/"):
+    return
 
-    if found_file_id:
-        bot.send_document(message.chat.id, found_file_id, caption= ها هو كتاب: {found_name} 📚")
-    else:
-        bot.reply_to(message, "❌ عذراً، لم يتم العثور على كتاب بهذا الاسم في الأرشيف.")
+  query = text.strip().lower()
 
-# تشغيل البوت
+  # البحث في الأرشيف بناءً على اسم الملف
+  found_file_id = None
+  found_name = None
+  for name, fid in books_archive.items():
+    if query in name.lower():
+      found_file_id = fid
+      found_name = name
+      break
+
+  # إرسال الكتاب أو الرد بعدم العثور عليه
+  if found_file_id:
+    bot.send_document(
+        message.chat.id, found_file_id, caption=f"📚 ها هو كتابك: {found_name}"
+    )
+  else:
+    bot.reply_to(
+        message,
+        f"❌ عذراً، لم يتم العثور على كتاب بهذا الاسم ('{text}') في الأرشيف.",
+    )
+
+
+# تشغيل البوت باستمرار على السيرفر
 bot.infinity_polling()
