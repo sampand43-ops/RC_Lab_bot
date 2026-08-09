@@ -35,11 +35,11 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• البوت يسحب الكتب الجديدة من القناة تلقائياً فور نشرها.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإعادة توجيهه إليك مباشرة من القناة بدون تكرار!"
+        "• البوت يسحب الكتب وأجزاءها من القناة تلقائياً.\n"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال جميع أجزائه ومجلداته المتوفرة دفعة واحدة!"
     )
 
-# دالة السحب التلقائي من القناة فور نشر أي كتاب جديد (يجب أن يكون البوت مشرفاً في القناة)
+# دالة السحب التلقائي من القناة فور نشر أي كتاب أو جزء جديد
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
     if message:
@@ -62,7 +62,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             finally:
                 conn.close()
 
-# دالة البحث وإعادة التوجيه المباشر للمستخدم
+# دالة البحث وجلب جميع الأجزاء والمجلدات وإعادة توجيهها دفعة واحدة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -85,24 +85,27 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # جلب نتيجة واحدة فريدة حصراً بناءً على رقم الرسالة لمنع أي تكرار
-    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id LIMIT 1", (f"%{clean_query}%",))
-    result = cursor.fetchone()
+    
+    # جلب جميع الأجزاء والمجلدات المطابقة لاسم الكتاب (بدون LIMIT 1 لجلب الكل)
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
+    results = cursor.fetchall()
     conn.close()
     
-    if result:
-        book_name, msg_id = result
-        try:
-            # إعادة توجيه الرسالة الأصلية من القناة مباشرة للمستخدم
-            await context.bot.forward_message(
-                chat_id=update.effective_chat.id,
-                from_chat_id=CHANNEL_ID,
-                message_id=msg_id
-            )
-        except Exception as e:
-            await update.message.reply_text(f"❌ عذراً، لم يتم العثور على الرسالة في القناة. تأكد أن البوت مشرف ولديه صلاحيات.")
+    if results:
+        await update.message.reply_text(f"🔍 وجدنا ({len(cols := results)}) نتيجة مطابقة، جاري إرسالها الآن:")
+        
+        for book_name, msg_id in results:
+            try:
+                # إعادة توجيه كل جزء أو مجلد على حِدة وبشكل متتالي
+                await context.bot.forward_message(
+                    chat_id=update.effective_chat.id,
+                    from_chat_id=CHANNEL_ID,
+                    message_id=msg_id
+                )
+            except Exception as e:
+                pass
     else:
-        await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
+        await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب أو أجزاء تطابق ('{clean_query}') في الأرشيف.")
 
 def main():
     init_db()
@@ -111,12 +114,10 @@ def main():
     application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    # الاستماع التلقائي لمنشورات القناة
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
-    # البحث النصي في الخاص وإعادة التوجيه
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, search_and_forward))
 
-    print("بوت السحب التلقائي والتوجيه المباشر يعمل الآن...")
+    print("بوت الأجزاء والتوجيه المتعدد يعمل الآن بكفاءة...")
     application.run_polling()
 
 if __name__ == "__main__":
