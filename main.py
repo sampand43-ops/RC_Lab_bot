@@ -37,7 +37,7 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• النظام جاهز ومحدث للبحث الدقيق وإرسال الكتب بدون تكرار أو تداخل."
+        "• النظام يعمل الآن بذكاء لتجاوز اختلاف الرموز والمسافات والشرطات في أسماء الكتب."
     )
 
 # دالة السحب التلقائي من القناة
@@ -95,7 +95,17 @@ def extract_part_number(filename):
             
     return 9999
 
-# دالة البحث الذكية المصححة لعدم تداخل الكتب وعلاج مشكلة الأسماء
+# دالة لتنظيف النص وتوحيد المسافات والشرطات لضمان المطابقة 100%
+def normalize_text(text):
+    if not text:
+        return ""
+    # استبدال الشرطات السفلية والشرطات العادية بمسافات لتوحيد صيغة البحث
+    text = text.replace('_', ' ').replace('-', ' ')
+    # إزالة المسافات الزائدة وتحويله لأحرف صغيرة
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip().lower()
+
+# دالة البحث الذكية والمحصنة ضد مشاكل التسمية والرموز
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -118,44 +128,42 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    # 1. محاولة البحث أولاً عما يبدأ بنص الطلب تماماً (للدقة العالية مثل "حياة الصحابة" أو "فن الحرب")
-    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? ORDER BY msg_id ASC", (f"{clean_query}%",))
-    results = cursor.fetchall()
-    
-    # 2. إذا لم يجد بدايات مطابقة، نبحث بالاحتواء الشامل لكن بشرط أن يكون مطبقاً بذكاء
-    if not results:
-        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? ORDER BY msg_id ASC", (f"%{clean_query}%",))
-        results = cursor.fetchall()
-
+    # جلب جميع السجلات من القاعدة لفحصها بذكاء برمجياً
+    cursor.execute("SELECT book_name, msg_id FROM archive")
+    all_records = cursor.fetchall()
     conn.close()
-    
-    if results:
-        # تصفية إضافية لمنع تداخل الكتب: إذا كان البحث قصيراً (مثل "فن الحرب")، نتجنب جلب الكتب التي تُعتبر إصدارات أو مؤلفين مختلفين تماماً إلا إذا كانت مطابقة للطلب
-        filtered_results = []
-        for book_name, msg_id in results:
-            # تنظيف اسم الملف للاستدلال
-            b_lower = book_name.lower()
-            q_lower = clean_query.lower()
-            
-            # إذا طلب المستخدم "فن الحرب" بحرفيتها، نتخطي النسخ التي تحتوي على اسم مؤلف إضافي مثل "نيكولاس" إلا إذا طلبها بالاسم
-            if q_lower == "فن الحرب" and "نيكولاس" in b_lower:
-                continue
-            filtered_results.append((book_name, msg_id))
-            
-        if not filtered_results:
-            filtered_results = results # العودة للنتائج الأصلية إذا تم استبعاد الكل بالخطأ
 
-        # فلترة برمجية قاطعة لمنع تكرار نفس الملف الحرفي 100%
+    norm_query = normalize_text(clean_query)
+    results = []
+    
+    # فحص كل اسم كتاب بعد تطبيق قاعدة التوحيد (تجاهل الفروق بين المسافات والشرطات والشرطات السفلية)
+    forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
+    
+    for book_name, msg_id in all_records:
+        norm_name = normalize_text(book_name)
+        
+        # التأكد من استبعاد البدايات الممنوعة
+        if any(norm_name.startswith(normalize_text(prefix)) for prefix in forbidden_prefixes):
+            continue
+            
+        # مطابقة ذكية: هل الكلمة المطلوبة موجودة داخل اسم الملف المطبع؟
+        if norm_query in norm_name:
+            # تصفية إضافية لمنع تداخل الكتب (مثل منع جلب كتاب نيكولاس عند طلب فن الحرب)
+            if norm_query == "فن حرب" and "نيكولاس" in norm_name:
+                continue
+            results.append((book_name, msg_id))
+
+    if results:
+        # فلترة قاطعة لمنع تكرار إرسال نفس الملف الحرفي 100%
         seen_exact_names = set()
         unique_results = []
-        for book_name, msg_id in filtered_results:
+        for book_name, msg_id in results:
             exact_name = book_name.strip()
             if exact_name not in seen_exact_names:
                 seen_exact_names.add(exact_name)
                 unique_results.append((book_name, msg_id))
 
-        # ترتيب النتائج حسب الأجزاء
+        # ترتيب النتائج بناءً على الأجزاء
         sorted_results = sorted(unique_results, key=lambda x: extract_part_number(x[0]))
 
         # إرسال الملفات المطلوبة
