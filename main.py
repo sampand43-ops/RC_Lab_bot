@@ -24,11 +24,12 @@ CHANNEL_ID = -1004395670008
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    # جعل book_name هو الفريد (UNIQUE) لضمان عدم قبول نفس اسم الملف مرتين أبداً في الأرشيف
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            book_name TEXT,
-            msg_id INTEGER UNIQUE
+            book_name TEXT UNIQUE,
+            msg_id INTEGER
         )
     """)
     conn.commit()
@@ -37,11 +38,11 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب بدون تكرار.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء الفريدة بالتسلسل!"
+        "• تم ضبط قاعدة البيانات بحيث يتم حفظ نسخة واحدة فقط لكل اسم ملف مطابق تماماً.\n"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الملفات والكتب بدون أي تكرار!"
     )
 
-# دالة السحب التلقائي من القناة
+# دالة السحب التلقائي من القناة (ستتجاهل أي ملف جديد إذا كان اسم تطابقه موجوداً مسبقاً)
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
     if message:
@@ -54,13 +55,14 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             try:
+                # إذا كان اسم الملف موجوداً مسبقاً، سيحدث تجاهل ولن يتم حفظ المكرر
                 cursor.execute(
                     "INSERT INTO archive (book_name, msg_id) VALUES (?, ?)",
                     (book_name, msg_id)
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
-                pass
+                pass # تجاهل النسخة المكررة تلقائياً لأن الاسم موجود مسبقاً
             finally:
                 conn.close()
 
@@ -97,7 +99,7 @@ def extract_part_number(filename):
             
     return 9999
 
-# دالة البحث النهائية والدقيقة
+# دالة البحث المباشرة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -121,12 +123,11 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # استخدام GROUP BY book_name لضمان جلب كل اسم ملف فريد مرة واحدة فقط وبدون تكرار في النتائج
-    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY book_name", (f"{clean_query}%",))
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ?", (f"{clean_query}%",))
     results = cursor.fetchall()
     
     if not results:
-        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY book_name", (f"%{clean_query}%",))
+        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ?", (f"%{clean_query}%",))
         all_results = cursor.fetchall()
         forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
         results = [
@@ -143,7 +144,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not valid_books:
             valid_books = sorted_results
 
-        # إرسال الكتب والأجزاء الفريدة حصراً
+        # إرسال النتائج الموجودة في الأرشيف (التي أصبحت خالية من التكرار جذرياً)
         for book_name, msg_id in valid_books:
             try:
                 await context.bot.forward_message(
@@ -168,7 +169,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت الأرشيف يعمل بكفاءة تامة...")
+    print("بوت الأرشيف المانع للتكرار الجذري يعمل بكفاءة تامة...")
     application.run_polling()
 
 if __name__ == "__main__":
