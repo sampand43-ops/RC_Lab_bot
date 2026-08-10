@@ -1,4 +1,3 @@
-
 import os
 import sqlite3
 import re
@@ -38,8 +37,7 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب وأجزائها بالتسلسل.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء بدقة فائقة!"
+        "• النظام يعمل الآن بكفاءة عالية وبدون أي تكرار ومع تجاهل تام للتشكيل والرموز."
     )
 
 # دالة السحب التلقائي من القناة
@@ -80,7 +78,7 @@ ARABIC_NUM_WORDS = {
 }
 
 def extract_part_number(filename):
-    match = re.search(r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
+    match = re.search(r'(الجزء|المجلد|مجلد|جـ?[\.\-\s]*)([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
     if match:
         val = match.group(2)
         if val in ARABIC_NUM_WORDS:
@@ -95,9 +93,30 @@ def extract_part_number(filename):
         if val.isdigit():
             return int(val)
             
-    return 9999
+    return 0
 
-# دالة البحث الذكية والدقيقة
+# دالة تنظيف النص وتطبيعه المتقدمة (تتجاهل التشكيل، الفواصل، والرموز بالكامل)
+def normalize_arabic(text):
+    if not text:
+        return ""
+    # إزالة التشكيل والحركات بالكامل
+    text = re.sub(r'[\u064b-\u0652]', '', text)
+    # توحيد أشكال الألف والهمزات
+    text = re.sub(r'[إأآٱ]', 'ا', text)
+    # توحيد الياء والى
+    text = re.sub(r'[ىي]', 'ي', text)
+    # توحيد الهاء والتاء المربوطة إن رغبت (اختياري، نتركها دقيقة أو نوحدها لضمان المطابقة)
+    text = re.sub(r'ؤ', 'و', text)
+    text = re.sub(r'ئ', 'ي', text)
+    # إزالة الExtensions والامتدادات الشائعة من اسم الملف أثناء المطابقة لكي لا تعيق البحث
+    text = re.sub(r'\.(pdf|epub|zip|rar|txt)', '', text, flags=re.IGNORECASE)
+    # استبدال كل الرموز، الفواصل، الشرطات، النقاط، والمسافات المتعددة بمسافة واحدة فارغة
+    text = re.sub(r'[^\w\s]', ' ', text)
+    text = text.replace('_', ' ')
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip().lower()
+
+# دالة البحث الذكية الخالية من التكرار والمدعومة بالتطبيع الشامل
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -120,32 +139,42 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    # نجلب كل الكتب التي تبدأ بالكلمة المطلوبة لضمان عدم جلب كتب لها اسم مختلف في البداية (مثل "صور من")
-    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"{clean_query}%",))
-    results = cursor.fetchall()
-    
-    # كخطوة إضافية ذكية: إذا لم نجد تطابقاً كاملاً في البداية، نبحث عما إذا كان اسم الكتاب يتضمن الكلمة ولكن بشرط ألا يسبقها اسم كتاب آخر مختلف كلياً
-    if not results:
-        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
-        all_results = cursor.fetchall()
-        # فلترة النتائج لتجنب الكتب التي تبدأ بكلمات غريبة مثل "صور من" إذا كان البحث عن "حياة الصحابة"
-        forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
-        results = [
-            item for item in all_results 
-            if not any(item[0].strip().startswith(prefix) for prefix in forbidden_prefixes)
-        ]
-
+    cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
+    all_records = cursor.fetchall()
     conn.close()
     
-    if results:
-        sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
-        valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
+    norm_query = normalize_arabic(clean_query)
+    results = []
+    
+    forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
+    
+    for book_name, msg_id in all_records:
+        norm_name = normalize_arabic(book_name)
         
-        if not valid_books:
-            valid_books = [sorted_results[0]]
+        if any(norm_name.startswith(normalize_arabic(prefix)) for prefix in forbidden_prefixes):
+            continue
+            
+        # مطابقة ذكية بعد تطبيع الكلمة واسم الملف بالكامل (تتجاهل الفواصل والتشكيل)
+        if norm_query in norm_name:
+            results.append((book_name, msg_id))
 
-        for book_name, msg_id in valid_books:
+    if results:
+        # ترتيب النتائج تصاعدياً حسب الأجزاء
+        sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
+
+        # منع التكرار القاطع
+        seen_msg_ids = set()
+        seen_file_names = set()
+        unique_books_to_send = []
+        
+        for book_name, msg_id in sorted_results:
+            clean_name_key = normalize_arabic(book_name)
+            if msg_id not in seen_msg_ids and clean_name_key not in seen_file_names:
+                seen_msg_ids.add(msg_id)
+                seen_file_names.add(clean_name_key)
+                unique_books_to_send.append((book_name, msg_id))
+
+        for book_name, msg_id in unique_books_to_send:
             try:
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
@@ -154,7 +183,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
                 await asyncio.sleep(0.5)
             except Exception as e:
-                pass
+                print(f"Error forwarding message {msg_id}: {e}")
     else:
         if update.effective_chat.type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
@@ -169,7 +198,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي والمفلتر يعمل الآن بكفاءة...")
+    print("بوت البحث الذكي يعمل الآن بكفاءة وبدون تكرار ومع تطبيع كامل للنصوص...")
     application.run_polling()
 
 if __name__ == "__main__":
