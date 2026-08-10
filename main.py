@@ -24,7 +24,6 @@ CHANNEL_ID = -1004395670008
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # جعل book_name هو الفريد (UNIQUE) لضمان عدم قبول نفس اسم الملف مرتين أبداً في الأرشيف
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -38,11 +37,11 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• تم ضبط قاعدة البيانات بحيث يتم حفظ نسخة واحدة فقط لكل اسم ملف مطابق تماماً.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الملفات والكتب بدون أي تكرار!"
+        "• تم تفعيل نظام منع التكرار الحرفي التام للكتب والأجزاء.\n"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء الفريدة بدون أي تكرار!"
     )
 
-# دالة السحب التلقائي من القناة (ستتجاهل أي ملف جديد إذا كان اسم تطابقه موجوداً مسبقاً)
+# دالة السحب التلقائي من القناة
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
     if message:
@@ -55,14 +54,13 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             try:
-                # إذا كان اسم الملف موجوداً مسبقاً، سيحدث تجاهل ولن يتم حفظ المكرر
                 cursor.execute(
                     "INSERT INTO archive (book_name, msg_id) VALUES (?, ?)",
                     (book_name, msg_id)
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
-                pass # تجاهل النسخة المكررة تلقائياً لأن الاسم موجود مسبقاً
+                pass
             finally:
                 conn.close()
 
@@ -99,7 +97,7 @@ def extract_part_number(filename):
             
     return 9999
 
-# دالة البحث المباشرة
+# دالة البحث مع الفلترة البرمجية الصارمة ضد التكرار الحرفي
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -144,8 +142,17 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not valid_books:
             valid_books = sorted_results
 
-        # إرسال النتائج الموجودة في الأرشيف (التي أصبحت خالية من التكرار جذرياً)
+        # فلترة برمجية قاطعة تمنع تكرار إرسال نفس اسم الملف الحرفي 100%
+        seen_exact_names = set()
+        unique_books_to_send = []
         for book_name, msg_id in valid_books:
+            exact_name = book_name.strip()
+            if exact_name not in seen_exact_names:
+                seen_exact_names.add(exact_name)
+                unique_books_to_send.append((book_name, msg_id))
+
+        # إرسال الملفات الفريدة فقط دون أي تكرار
+        for book_name, msg_id in unique_books_to_send:
             try:
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
@@ -169,8 +176,9 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت الأرشيف المانع للتكرار الجذري يعمل بكفاءة تامة...")
+    print("بوت الأرشيف المانع للتكرار الحرفي يعمل بكفاءة تامة...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
+
