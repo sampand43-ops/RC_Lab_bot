@@ -79,7 +79,8 @@ ARABIC_NUM_WORDS = {
 }
 
 def extract_part_number(filename):
-    match = re.search(r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
+    # تحسين التعبير النمطي لالتقاط جميع أشكال كتابة الأجزاء (مثل جـ.1 أو جـ1 أو الجزء الأول)
+    match = re.search(r'(الجزء|المجلد|جـ?[\.\-\s]*|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
     if match:
         val = match.group(2)
         if val in ARABIC_NUM_WORDS:
@@ -94,19 +95,18 @@ def extract_part_number(filename):
         if val.isdigit():
             return int(val)
             
-    return 9999
+    # إذا لم يجد رقم جزء، نعطيه رقماً افتراضياً (1) بدلاً من استبعاده تماماً
+    return 1
 
-# دالة لتنظيف النص واستثناء التشكيل والفواصل والرموز تماماً
+# دالة تنظيف النص واستثناء التشكيل والرموز والفواصل تماماً
 def normalize_arabic(text):
     if not text:
         return ""
-    # إزالة التشكيل والحركات
     text = re.sub(r'[\u064b-\u0652]', '', text)
     text = re.sub(r'[إأآٱ]', 'ا', text)
     text = re.sub(r'ى', 'ي', text)
     text = re.sub(r'ؤ', 'و', text)
     text = re.sub(r'ئ', 'ي', text)
-    # استبدال الفواصل والرموز والشرطات بمسافات
     text = re.sub(r'[^\w\s]', ' ', text)
     text = text.replace('_', ' ')
     text = re.sub(r'\s+', ' ', text)
@@ -136,7 +136,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # جلب جميع السجلات من القاعدة لعمل المطابقة الذكية بعد تنظيف النصوص
     cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
     all_records = cursor.fetchall()
     conn.close()
@@ -144,28 +143,24 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     norm_query = normalize_arabic(clean_query)
     results = []
     
-    
+    # تم حذف "صور من" بناءً على طلبك لكي يظهر الكتاب بشكل طبيعي
+    forbidden_prefixes = ["قصص من", "مختصر", "شرح"]
     norm_forbidden = [normalize_arabic(p) for p in forbidden_prefixes]
 
     for book_name, msg_id in all_records:
         norm_name = normalize_arabic(book_name)
         
-        # استثناء البادئات الممنوعة
         if any(norm_name.startswith(p) for p in norm_forbidden):
             continue
             
-        # المطابقة الذكية التي تتجاهل التشكيل والرموز والفواصل
         if norm_query in norm_name:
             results.append((book_name, msg_id))
     
     if results:
+        # ترتيب النتائج تصاعدياً حسب رقم الجزء المستخرج
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
-        valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
-        
-        if not valid_books:
-            valid_books = [sorted_results[0]]
 
-        for book_name, msg_id in valid_books:
+        for book_name, msg_id in sorted_results:
             try:
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
@@ -174,7 +169,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
                 await asyncio.sleep(0.5)
             except Exception as e:
-                pass
+                print(f"Error forwarding message {msg_id}: {e}")
     else:
         if update.effective_chat.type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
