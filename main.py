@@ -11,7 +11,7 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# مسار التخزين الدائم على Railway (لا يُحذف أبداً عند تحديث الكود)
+# مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
@@ -38,10 +38,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
         "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب وأجزائها بالتسلسل.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء مباشرة!"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء بدقة فائقة!"
     )
 
-# دالة السحب التلقائي من القناة فور نشر أي كتاب أو جزء جديد
+# دالة السحب التلقائي من القناة
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
     if message:
@@ -60,11 +60,11 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
-                pass # الكتاب مسجل مسبقاً، نتجاهله لتجنب التكرار
+                pass
             finally:
                 conn.close()
 
-# قاموس لتحويل الكلمات العربية للأجزاء إلى أرقام لضمان الترتيب التسلسلي الدقيق
+# قاموس الأرقام
 ARABIC_NUM_WORDS = {
     'الأول': 1, 'اول': 1, '1': 1,
     'الثاني': 2, 'ثاني': 2, '2': 2,
@@ -96,7 +96,7 @@ def extract_part_number(filename):
             
     return 9999
 
-# دالة البحث، الفلترة، الترتيب، وإعادة التوجيه (تعمل الآن في الخاص والمجموعات)
+# دالة البحث الذكية والدقيقة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -119,8 +119,22 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
+    
+    # نجلب كل الكتب التي تبدأ بالكلمة المطلوبة لضمان عدم جلب كتب لها اسم مختلف في البداية (مثل "صور من")
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"{clean_query}%",))
     results = cursor.fetchall()
+    
+    # كخطوة إضافية ذكية: إذا لم نجد تطابقاً كاملاً في البداية، نبحث عما إذا كان اسم الكتاب يتضمن الكلمة ولكن بشرط ألا يسبقها اسم كتاب آخر مختلف كلياً
+    if not results:
+        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
+        all_results = cursor.fetchall()
+        # فلترة النتائج لتجنب الكتب التي تبدأ بكلمات غريبة مثل "صور من" إذا كان البحث عن "حياة الصحابة"
+        forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
+        results = [
+            item for item in all_results 
+            if not any(item[0].strip().startswith(prefix) for prefix in forbidden_prefixes)
+        ]
+
     conn.close()
     
     if results:
@@ -130,7 +144,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not valid_books:
             valid_books = [sorted_results[0]]
 
-        # إرسال الملفات مع فاصل زمني 0.5 ثانية (سواء في الخاص أو الجروب)
         for book_name, msg_id in valid_books:
             try:
                 await context.bot.forward_message(
@@ -142,7 +155,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception as e:
                 pass
     else:
-        # في المجموعات، يفضل أحياناً عدم إزعاج الأعضاء برسالة "لم يتم العثور"، لذا سنرسلها فقط إذا كان في المحادثة الخاصة أو نتركها للكل حسب رغبتك
         if update.effective_chat.type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
 
@@ -154,11 +166,9 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
-    
-    # التعديل هنا: السماح للرسائل النصية بالعمل في الخاص والمجموعات (Groups & Supergroups & Private)
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت التوجيه الذكي (خاص + مجموعات) يعمل الآن بكفاءة...")
+    print("بوت البحث الذكي والمفلتر يعمل الآن بكفاءة...")
     application.run_polling()
 
 if __name__ == "__main__":
