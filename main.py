@@ -37,7 +37,7 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• النظام يعمل الآن بكفاءة عالية وبدون أي تكرار ومع تجاهل تام للتشكيل والرموز."
+        "• النظام يعمل الآن بكفاءة عالية وبدون أي تكرار."
     )
 
 # دالة السحب التلقائي من القناة
@@ -95,28 +95,23 @@ def extract_part_number(filename):
             
     return 0
 
-# دالة تنظيف النص وتطبيعه المتقدمة (تتجاهل التشكيل، الفواصل، والرموز بالكامل)
+# دالة تنظيف النص الأساسية والمعدلة لاستثناء التشكيل والرموز بدقة
 def normalize_arabic(text):
     if not text:
         return ""
     # إزالة التشكيل والحركات بالكامل
     text = re.sub(r'[\u064b-\u0652]', '', text)
-    # توحيد أشكال الألف والهمزات
     text = re.sub(r'[إأآٱ]', 'ا', text)
-    # توحيد الياء والى
-    text = re.sub(r'[ىي]', 'ي', text)
-    # توحيد الهاء والتاء المربوطة إن رغبت (اختياري، نتركها دقيقة أو نوحدها لضمان المطابقة)
+    text = re.sub(r'ى', 'ي', text)
     text = re.sub(r'ؤ', 'و', text)
     text = re.sub(r'ئ', 'ي', text)
-    # إزالة الExtensions والامتدادات الشائعة من اسم الملف أثناء المطابقة لكي لا تعيق البحث
-    text = re.sub(r'\.(pdf|epub|zip|rar|txt)', '', text, flags=re.IGNORECASE)
-    # استبدال كل الرموز، الفواصل، الشرطات، النقاط، والمسافات المتعددة بمسافة واحدة فارغة
+    # استبدال الرموز والفواصل والشرطات بمسافات لضمان عدم تداخل الكلمات
     text = re.sub(r'[^\w\s]', ' ', text)
     text = text.replace('_', ' ')
     text = re.sub(r'\s+', ' ', text)
     return text.strip().lower()
 
-# دالة البحث الذكية الخالية من التكرار والمدعومة بالتطبيع الشامل
+# دالة البحث الذكية الخالية من التكرار (بنفس المنطق المفضل لديك)
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -139,6 +134,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    # جلب السجلات الفريدة تماماً من قاعدة البيانات
     cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
     all_records = cursor.fetchall()
     conn.close()
@@ -154,7 +150,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if any(norm_name.startswith(normalize_arabic(prefix)) for prefix in forbidden_prefixes):
             continue
             
-        # مطابقة ذكية بعد تطبيع الكلمة واسم الملف بالكامل (تتجاهل الفواصل والتشكيل)
         if norm_query in norm_name:
             results.append((book_name, msg_id))
 
@@ -162,13 +157,13 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # ترتيب النتائج تصاعدياً حسب الأجزاء
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
 
-        # منع التكرار القاطع
+        # منع التكرار القاطع (بناءً على تطابق معرف الرسالة وأيضاً تطابق اسم الملف بالحرف الواحد)
         seen_msg_ids = set()
         seen_file_names = set()
         unique_books_to_send = []
         
         for book_name, msg_id in sorted_results:
-            clean_name_key = normalize_arabic(book_name)
+            clean_name_key = book_name.strip().lower()
             if msg_id not in seen_msg_ids and clean_name_key not in seen_file_names:
                 seen_msg_ids.add(msg_id)
                 seen_file_names.add(clean_name_key)
@@ -198,7 +193,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي يعمل الآن بكفاءة وبدون تكرار ومع تطبيع كامل للنصوص...")
+    print("بوت البحث الذكي يعمل الآن بكفاءة وبدون تكرار...")
     application.run_polling()
 
 if __name__ == "__main__":
