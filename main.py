@@ -37,8 +37,8 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• تم تفعيل نظام منع التكرار الحرفي التام للكتب والأجزاء.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء الفريدة بدون أي تكرار!"
+        "• تم ضبط نظام البحث والفلترة ليكون دقيقاً وشاملاً بدون أي تكرار.\n"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال المطلوب بدقة تامة!"
     )
 
 # دالة السحب التلقائي من القناة
@@ -97,7 +97,7 @@ def extract_part_number(filename):
             
     return 9999
 
-# دالة البحث مع الفلترة البرمجية الصارمة ضد التكرار الحرفي
+# دالة البحث والمعالجة الذكية والدقيقة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -121,15 +121,15 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ?", (f"{clean_query}%",))
+    # استخدام البحث الشامل (من الجهتين %query%) لضمان إيجاد الكتاب بغض النظر عن موقع الكلمة (مثل حياة الصحابة)
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ?", (f"%{clean_query}%",))
     results = cursor.fetchall()
     
-    if not results:
-        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ?", (f"%{clean_query}%",))
-        all_results = cursor.fetchall()
+    # تصفية الكلمات المحظورة إذا وُجدت نتائج غير مقصودة
+    if results:
         forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
         results = [
-            item for item in all_results 
+            item for item in results 
             if not any(item[0].strip().startswith(prefix) for prefix in forbidden_prefixes)
         ]
 
@@ -137,21 +137,17 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
-        valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
         
-        if not valid_books:
-            valid_books = sorted_results
-
-        # فلترة برمجية قاطعة تمنع تكرار إرسال نفس اسم الملف الحرفي 100%
+        # تفلترة برمجية قاطعة تمنع تماماً تكرار إرسال أي ملف يتطابق اسمه الحرفي
         seen_exact_names = set()
         unique_books_to_send = []
-        for book_name, msg_id in valid_books:
+        for book_name, msg_id in sorted_results:
             exact_name = book_name.strip()
             if exact_name not in seen_exact_names:
                 seen_exact_names.add(exact_name)
                 unique_books_to_send.append((book_name, msg_id))
 
-        # إرسال الملفات الفريدة فقط دون أي تكرار
+        # إرسال الملفات الفريدة فقط بدون أي تكرار وبفصل زمني آمن
         for book_name, msg_id in unique_books_to_send:
             try:
                 await context.bot.forward_message(
@@ -176,9 +172,8 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت الأرشيف المانع للتكرار الحرفي يعمل بكفاءة تامة...")
+    print("بوت الأرشيف المحسّن يعمل بكفاءة تامة...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
-
