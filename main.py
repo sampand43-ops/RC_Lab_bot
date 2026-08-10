@@ -94,24 +94,28 @@ def extract_part_number(filename):
         if val.isdigit():
             return int(val)
             
-    return 9999
+    return 1  # افتراض الجزء الأول بدلاً من 9999 لضمان الترتيب الصحيح
 
-# دالة لتنظيف النص تماماً من الرموز، الفواصل، النقاط، والتشكيل للمطابقة السليمة
+# دالة لتنظيف النص تماماً من الرموز، الامتدادات، الفواصل، النقاط، والتشكيل
 def normalize_arabic(text):
     if not text:
         return ""
+    text = re.sub(r'\.(pdf|epub|zip|rar|txt|doc|docx)$', '', text, flags=re.IGNORECASE) # إزالة الامتداد
     text = re.sub(r'[\u064b-\u0652]', '', text)  # إزالة التشكيل
     text = re.sub(r'[إأآٱ]', 'ا', text)
     text = re.sub(r'ى', 'ي', text)
     text = re.sub(r'ؤ', 'و', text)
     text = re.sub(r'ئ', 'ي', text)
-    text = re.sub(r'[^\w\s]', ' ', text)         # تحويل الرموز والفواصل والنقاط إلى مسافات
+    text = re.sub(r'[^\w\s]', ' ', text)         # تحويل الرموز والفواصل إلى مسافات
     text = text.replace('_', ' ')
     text = re.sub(r'\s+', ' ', text)              # دمج المسافات المتعددة
     return text.strip().lower()
 
-# دالة البحث الذكية والدقيقة (محمية ضد الرموز والفواصل وتدعم هيكلتك المفضلة)
+# دالة البحث الذكية والدقيقة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+        
     text = update.message.text.strip()
     
     clean_query = text
@@ -134,7 +138,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # نسحب السجلات ونطبق التنظيف والمطابقة في بايثون لتفادي مشاكل الفواصل والرموز في SQL LIKE
     cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
     all_records = cursor.fetchall()
     conn.close()
@@ -147,7 +150,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if norm_name.startswith(norm_query):
             results.append((book_name, msg_id))
             
-    # خطوة احتياطية ثانية بنفس منطقك إذا لم يوجد تطابق في البداية تماماً
+    # خطوة احتياطية إذا لم يوجد تطابق في البداية تماماً
     if not results:
         forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
         norm_forbidden = [normalize_arabic(p) for p in forbidden_prefixes]
@@ -159,13 +162,10 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     results.append((book_name, msg_id))
     
     if results:
+        # ترتيب النتائج حسب رقم الجزء دون حذف أي ملف
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
-        valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
-        
-        if not valid_books:
-            valid_books = [sorted_results[0]]
 
-        for book_name, msg_id in valid_books:
+        for book_name, msg_id in sorted_results:
             try:
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
@@ -174,7 +174,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
                 await asyncio.sleep(0.5)
             except Exception as e:
-                pass
+                print(f"خطأ في توجيه الرسالة: {e}")
     else:
         if update.effective_chat.type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
@@ -194,3 +194,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
