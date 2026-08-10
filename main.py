@@ -96,7 +96,7 @@ def extract_part_number(filename):
             
     return 9999
 
-# دالة البحث الذكية والدقيقة بنسبة 100%
+# دالة البحث الذكية مع فلترة برمجية سليمة لمنع التكرار الحرفي بدون خربطة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -120,12 +120,12 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # استخدام GROUP BY book_name لمنع أي تكرار نفس اسم الملف في قاعدة البيانات وتصفية النسخ المطابقة تماماً
-    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY book_name", (f"{clean_query}%",))
+    # استعلام مرن يجلب جميع السجلات المطابقة مرتبة حسب معرف الرسالة (لتجنب ضياع أي كتاب)
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? ORDER BY msg_id ASC", (f"{clean_query}%",))
     results = cursor.fetchall()
     
     if not results:
-        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY book_name", (f"%{clean_query}%",))
+        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? ORDER BY msg_id ASC", (f"%{clean_query}%",))
         all_results = cursor.fetchall()
         forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
         results = [
@@ -136,10 +136,19 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn.close()
     
     if results:
-        # ترتيب النتائج بناءً على رقم الجزء (إن وُجد)
-        sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
+        # 1. فلترة برمجية تمنع تكرار الكتب ذات الاسم المطابق 100% بدقة دون المساس بالكتب الأخرى
+        seen_exact_names = set()
+        unique_results = []
+        for book_name, msg_id in results:
+            exact_name = book_name.strip()
+            if exact_name not in seen_exact_names:
+                seen_exact_names.add(exact_name)
+                unique_results.append((book_name, msg_id))
 
-        # إرسال الكتب والأجزاء الفريدة مباشرة دون أي تكرار
+        # 2. ترتيب النتائج الفريدة بناءً على رقم الجزء (الأول، الثاني، إلخ) أو ترك الكتب العادية بمكانها الصحيح
+        sorted_results = sorted(unique_results, key=lambda x: extract_part_number(x[0]))
+
+        # إرسال الملفات المطلوبة بسلاسة
         for book_name, msg_id in sorted_results:
             try:
                 await context.bot.forward_message(
@@ -164,7 +173,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي يعمل بكفاءة تامة ودون أي تكرار...")
+    print("بوت البحث الذكي يعمل الآن بكفاءة تامة ودون أي تكرار أو أخطاء...")
     application.run_polling()
 
 if __name__ == "__main__":
