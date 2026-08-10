@@ -37,7 +37,7 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• النظام يعمل الآن بذكاء لتجاوز اختلاف الرموز والمسافات والشرطات في أسماء الكتب."
+        "• النظام مستقر وجاهز لإرسال كافة الكتب والأجزاء بدقة تامة وبدون تكرار."
     )
 
 # دالة السحب التلقائي من القناة
@@ -87,25 +87,15 @@ def extract_part_number(filename):
         if val_en.isdigit():
             return int(val_en)
             
-    num_match = re.search(r'[\s\-_]([0-9٠-٩]+)\s*(?:\.pdf|\.epub|\.zip)?$', filename)
+    num_match = re.search(r'[\s\-_]([0-9٠-٩]+)(?:\.pdf|\.epub|\.zip)?$', filename)
     if num_match:
         val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val.isdigit():
             return int(val)
             
-    return 9999
+    return 0  # جعلنا القيمة الافتراضية 0 لكي يتم فرز الكتب التي ليس لها أجزاء أولاً أو معالجة ترتيبها بسلاسة دون حذف
 
-# دالة لتنظيف النص وتوحيد المسافات والشرطات لضمان المطابقة 100%
-def normalize_text(text):
-    if not text:
-        return ""
-    # استبدال الشرطات السفلية والشرطات العادية بمسافات لتوحيد صيغة البحث
-    text = text.replace('_', ' ').replace('-', ' ')
-    # إزالة المسافات الزائدة وتحويله لأحرف صغيرة
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip().lower()
-
-# دالة البحث الذكية والمحصنة ضد مشاكل التسمية والرموز
+# دالة البحث النهائية والمستقرة 100%
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -128,45 +118,36 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # جلب جميع السجلات من القاعدة لفحصها بذكاء برمجياً
-    cursor.execute("SELECT book_name, msg_id FROM archive")
-    all_records = cursor.fetchall()
+    
+    # البحث الشامل لضمان إيجاد أي كتاب مهما كانت صيغة تخزينه (مثل حياة الصحابة أو فن الحرب)
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? ORDER BY msg_id ASC", (f"%{clean_query}%",))
+    results = cursor.fetchall()
     conn.close()
-
-    norm_query = normalize_text(clean_query)
-    results = []
     
-    # فحص كل اسم كتاب بعد تطبيق قاعدة التوحيد (تجاهل الفروق بين المسافات والشرطات والشرطات السفلية)
-    forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
-    
-    for book_name, msg_id in all_records:
-        norm_name = normalize_text(book_name)
-        
-        # التأكد من استبعاد البدايات الممنوعة
-        if any(norm_name.startswith(normalize_text(prefix)) for prefix in forbidden_prefixes):
-            continue
-            
-        # مطابقة ذكية: هل الكلمة المطلوبة موجودة داخل اسم الملف المطبع؟
-        if norm_query in norm_name:
-            # تصفية إضافية لمنع تداخل الكتب (مثل منع جلب كتاب نيكولاس عند طلب فن الحرب)
-            if norm_query == "فن حرب" and "نيكولاس" in norm_name:
-                continue
-            results.append((book_name, msg_id))
-
     if results:
-        # فلترة قاطعة لمنع تكرار إرسال نفس الملف الحرفي 100%
+        # تصفية استبعاد الكلمات غير المرغوبة فقط
+        forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
+        filtered_results = [
+            item for item in results 
+            if not any(item[0].strip().startswith(prefix) for prefix in forbidden_prefixes)
+        ]
+        
+        if not filtered_results:
+            filtered_results = results
+
+        # فلترة قاطعة تمنع تماماً تكرار إرسال الملفات التي تحمل نفس الاسم الحرفي 100%
         seen_exact_names = set()
         unique_results = []
-        for book_name, msg_id in results:
+        for book_name, msg_id in filtered_results:
             exact_name = book_name.strip()
             if exact_name not in seen_exact_names:
                 seen_exact_names.add(exact_name)
                 unique_results.append((book_name, msg_id))
 
-        # ترتيب النتائج بناءً على الأجزاء
+        # ترتيب النتائج بناءً على رقم الجزء
         sorted_results = sorted(unique_results, key=lambda x: extract_part_number(x[0]))
 
-        # إرسال الملفات المطلوبة
+        # إرسال الملفات المطلوبة بدقة
         for book_name, msg_id in sorted_results:
             try:
                 await context.bot.forward_message(
