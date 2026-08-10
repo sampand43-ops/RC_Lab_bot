@@ -37,8 +37,8 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب وأجزائها بالتسلسل.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء بدقة فائقة!"
+        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب بدون أي تكرار.\n"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء الفريدة بالتسلسل!"
     )
 
 # دالة السحب التلقائي من القناة
@@ -96,7 +96,7 @@ def extract_part_number(filename):
             
     return 9999
 
-# دالة البحث الذكية والدقيقة
+# دالة البحث المصفاة من التكرار تماماً
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -120,15 +120,13 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # نجلب كل الكتب التي تبدأ بالكلمة المطلوبة لضمان عدم جلب كتب لها اسم مختلف في البداية (مثل "صور من")
-    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"{clean_query}%",))
+    # استخدام DISTINCT أو GROUP BY book_name لضمان عدم جلب أسماء ملفات مكررة مطابقة تماماً
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY book_name", (f"{clean_query}%",))
     results = cursor.fetchall()
     
-    # كخطوة إضافية ذكية: إذا لم نجد تطابقاً كاملاً في البداية، نبحث عما إذا كان اسم الكتاب يتضمن الكلمة ولكن بشرط ألا يسبقها اسم كتاب آخر مختلف كلياً
     if not results:
-        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
+        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY book_name", (f"%{clean_query}%",))
         all_results = cursor.fetchall()
-        # فلترة النتائج لتجنب الكتب التي تبدأ بكلمات غريبة مثل "صور من" إذا كان البحث عن "حياة الصحابة"
         forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
         results = [
             item for item in all_results 
@@ -144,6 +142,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not valid_books:
             valid_books = [sorted_results[0]]
 
+        # إرسال الملفات الفريدة فقط بدون أي تكرار
         for book_name, msg_id in valid_books:
             try:
                 await context.bot.forward_message(
@@ -168,9 +167,8 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي والمفلتر يعمل الآن بكفاءة...")
+    print("بوت منع التكرار والترتيب يعمل بكفاءة تامة...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
-
