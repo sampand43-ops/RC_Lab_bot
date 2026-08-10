@@ -37,8 +37,7 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب وأجزائها بالتسلسل.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء بدقة فائقة!"
+        "• النظام يعمل الآن بكفاءة عالية وبدون أي تكرار."
     )
 
 # دالة السحب التلقائي من القناة
@@ -79,7 +78,7 @@ ARABIC_NUM_WORDS = {
 }
 
 def extract_part_number(filename):
-    match = re.search(r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
+    match = re.search(r'(الجزء|المجلد|مجلد|جـ?[\.\-\s]*)([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
     if match:
         val = match.group(2)
         if val in ARABIC_NUM_WORDS:
@@ -94,27 +93,23 @@ def extract_part_number(filename):
         if val.isdigit():
             return int(val)
             
-    return 9999
+    return 0
 
-# دالة متقدمة لتنظيف النص وتوحيده (تتجاهل التشكيل، الهمزات، الرموز، الفواصل، والشرطات)
+# دالة تنظيف النص وتطبيعه الشاملة
 def normalize_arabic(text):
     if not text:
         return ""
-    # 1. إزالة الحركات والتشكيل العربي
     text = re.sub(r'[\u064b-\u0652]', '', text)
-    # 2. توحيد أشكال الألف (أ، إ، آ -> ا) والتاء المربوطة والهاء إذا لزم، وتوحيد الهمزات
     text = re.sub(r'[إأآٱ]', 'ا', text)
     text = re.sub(r'ى', 'ي', text)
     text = re.sub(r'ؤ', 'و', text)
     text = re.sub(r'ئ', 'ي', text)
-    # 3. إزالة الرموز، الفواصل، النقاط، الشرطات، والشرطات السفلية واستبدالها بمسافات
     text = re.sub(r'[^\w\s]', ' ', text)
     text = text.replace('_', ' ')
-    # 4. ضغط المسافات المتعددة وتحويل النص لأحرف صغيرة
     text = re.sub(r'\s+', ' ', text)
     return text.strip().lower()
 
-# دالة البحث الذكية والدقيقة المطورة
+# دالة البحث الذكية الخالية من التكرار
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -137,8 +132,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    
-    # جلب جميع السجلات من قاعدة البيانات لنقوم بمطابقتها برمجياً بعد التطبيع الشامل
+    # جلب السجلات الفريدة تماماً من قاعدة البيانات
     cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
     all_records = cursor.fetchall()
     conn.close()
@@ -151,28 +145,26 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     for book_name, msg_id in all_records:
         norm_name = normalize_arabic(book_name)
         
-        # استبعاد البدايات الممنوعة
         if any(norm_name.startswith(normalize_arabic(prefix)) for prefix in forbidden_prefixes):
             continue
             
-        # المطابقة الذكية بعد إزالة الفواصل والتشكيل والشرطات
         if norm_query in norm_name:
             results.append((book_name, msg_id))
 
     if results:
+        # ترتيب النتائج تصاعدياً حسب الأجزاء
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
-        valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
-        
-        if not valid_books:
-            valid_books = [sorted_results[0]]
 
-        # منع تكرار إرسال الملفات التي تحمل نفس الاسم الحرفي 100%
-        seen_exact_names = set()
+        # منع التكرار القاطع (بناءً على تطابق معرف الرسالة وأيضاً تطابق اسم الملف بالحرف الواحد)
+        seen_msg_ids = set()
+        seen_file_names = set()
         unique_books_to_send = []
-        for book_name, msg_id in valid_books:
-            exact_name = book_name.strip()
-            if exact_name not in seen_exact_names:
-                seen_exact_names.add(exact_name)
+        
+        for book_name, msg_id in sorted_results:
+            clean_name_key = book_name.strip().lower()
+            if msg_id not in seen_msg_ids and clean_name_key not in seen_file_names:
+                seen_msg_ids.add(msg_id)
+                seen_file_names.add(clean_name_key)
                 unique_books_to_send.append((book_name, msg_id))
 
         for book_name, msg_id in unique_books_to_send:
@@ -184,7 +176,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
                 await asyncio.sleep(0.5)
             except Exception as e:
-                pass
+                print(f"Error forwarding message {msg_id}: {e}")
     else:
         if update.effective_chat.type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
@@ -199,7 +191,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي والمفلتر يعمل الآن بكفاءة...")
+    print("بوت البحث الذكي يعمل الآن بكفاءة وبدون تكرار...")
     application.run_polling()
 
 if __name__ == "__main__":
