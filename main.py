@@ -37,7 +37,7 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب بدون تكرار للنسخ المطابقة.\n"
+        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب بدون أي تكرار.\n"
         "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء بالتسلسل!"
     )
 
@@ -97,7 +97,15 @@ def extract_part_number(filename):
             
     return 9999
 
-# دالة البحث السليمة (تمنع تكرار إرسال نفس الملف المطابق بالاسم تماماً، وتجلب جميع الأجزاء والكتب)
+# دالة لتنظيف اسم الملف وجعله موحداً لمقارنة التكرار بدقة
+def normalize_filename(filename):
+    # إزالة الامتدادات مثل .pdf أو .epub
+    name = re.sub(r'\.(pdf|epub|zip|rar)$', '', filename, flags=re.IGNORECASE)
+    # توحيد المسافات وإزالة الرموز الزائدة
+    name = re.sub(r'[\s\-_–()\[\]]+', ' ', name).strip()
+    return name
+
+# دالة البحث المصفاة بحذر شديد لضمان عدم إرسال نسخ مكررة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -121,7 +129,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # جلب جميع النتائج التي تبدأ بالاستعلام دون حذف الأجزاء
     cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"{clean_query}%",))
     results = cursor.fetchall()
     
@@ -139,22 +146,20 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
         
-        # فلترة ذكية في بايثون: منع تكرار إرسال الملف الذي يحمل نفس الاسم بالحرف تماماً
-        seen_book_names = set()
+        # تصفية صارمة لمنع التكرار باستخدام دالة التطبيع
+        seen_normalized_names = set()
         unique_results = []
         for book_name, msg_id in sorted_results:
-            # تنظيف اسم الملف قليلاً للمقارنة الدقيقة
-            normalized_name = book_name.strip()
-            if normalized_name not in seen_book_names:
-                seen_book_names.add(normalized_name)
+            norm_name = normalize_filename(book_name)
+            if norm_name not in seen_normalized_names:
+                seen_normalized_names.add(norm_name)
                 unique_results.append((book_name, msg_id))
 
         valid_books = [item for item in unique_results if extract_part_number(item[0]) != 9999]
         
         if not valid_books:
-            valid_books = unique_results # إذا لم تكن هناك أجزاء مقسمة، نرسل النتائج الفريدة بدون تكرار
+            valid_books = unique_results
 
-        # إرسال الملفات الفريدة فقط مع الفاصل الزمني
         for book_name, msg_id in valid_books:
             try:
                 await context.bot.forward_message(
@@ -179,8 +184,9 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت التوجيه الدقيق المانع للتكرار يعمل بكفاءة...")
+    print("بوت التوجيه الذكي المانع للتكرار المتقدم يعمل الآن...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
+
