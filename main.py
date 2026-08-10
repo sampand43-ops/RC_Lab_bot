@@ -37,8 +37,8 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب بدون أي تكرار.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء الفريدة بالتسلسل!"
+        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب بدون تكرار للنسخ المطابقة.\n"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء بالتسلسل!"
     )
 
 # دالة السحب التلقائي من القناة
@@ -88,15 +88,16 @@ def extract_part_number(filename):
         if val_en.isdigit():
             return int(val_en)
             
-    num_match = re.search(r'[\s\-_]([0-9٠-٩]+)\s*(?:\.pdf|\.epub|\.zip)?$', filename)
+    num_match = re.search(r'[\s\-_]([0-9٠-٩]+|\([0-9٠-٩]+\))\s*(?:\.pdf|\.epub|\.zip)?$', filename)
     if num_match:
         val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
-        if val.isdigit():
-            return int(val)
+        val_clean = re.sub(r'[()\s]', '', val)
+        if val_clean.isdigit():
+            return int(val_clean)
             
     return 9999
 
-# دالة البحث المصفاة من التكرار تماماً
+# دالة البحث السليمة (تمنع تكرار إرسال نفس الملف المطابق بالاسم تماماً، وتجلب جميع الأجزاء والكتب)
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -120,12 +121,12 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # استخدام DISTINCT أو GROUP BY book_name لضمان عدم جلب أسماء ملفات مكررة مطابقة تماماً
-    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY book_name", (f"{clean_query}%",))
+    # جلب جميع النتائج التي تبدأ بالاستعلام دون حذف الأجزاء
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"{clean_query}%",))
     results = cursor.fetchall()
     
     if not results:
-        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY book_name", (f"%{clean_query}%",))
+        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
         all_results = cursor.fetchall()
         forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
         results = [
@@ -137,12 +138,23 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
-        valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
+        
+        # فلترة ذكية في بايثون: منع تكرار إرسال الملف الذي يحمل نفس الاسم بالحرف تماماً
+        seen_book_names = set()
+        unique_results = []
+        for book_name, msg_id in sorted_results:
+            # تنظيف اسم الملف قليلاً للمقارنة الدقيقة
+            normalized_name = book_name.strip()
+            if normalized_name not in seen_book_names:
+                seen_book_names.add(normalized_name)
+                unique_results.append((book_name, msg_id))
+
+        valid_books = [item for item in unique_results if extract_part_number(item[0]) != 9999]
         
         if not valid_books:
-            valid_books = [sorted_results[0]]
+            valid_books = unique_results # إذا لم تكن هناك أجزاء مقسمة، نرسل النتائج الفريدة بدون تكرار
 
-        # إرسال الملفات الفريدة فقط بدون أي تكرار
+        # إرسال الملفات الفريدة فقط مع الفاصل الزمني
         for book_name, msg_id in valid_books:
             try:
                 await context.bot.forward_message(
@@ -167,7 +179,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت منع التكرار والترتيب يعمل بكفاءة تامة...")
+    print("بوت التوجيه الدقيق المانع للتكرار يعمل بكفاءة...")
     application.run_polling()
 
 if __name__ == "__main__":
