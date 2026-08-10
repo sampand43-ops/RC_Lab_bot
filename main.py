@@ -144,7 +144,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     norm_query = normalize_arabic(clean_query)
     results = []
     
-    forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
+    
     norm_forbidden = [normalize_arabic(p) for p in forbidden_prefixes]
 
     for book_name, msg_id in all_records:
