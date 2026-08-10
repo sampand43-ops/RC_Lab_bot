@@ -96,25 +96,7 @@ def extract_part_number(filename):
             
     return 9999
 
-# دالة متقدمة لتنظيف النص وتوحيده (تتجاهل التشكيل، الهمزات، الرموز، الفواصل، والشرطات)
-def normalize_arabic(text):
-    if not text:
-        return ""
-    # 1. إزالة الحركات والتشكيل العربي
-    text = re.sub(r'[\u064b-\u0652]', '', text)
-    # 2. توحيد أشكال الألف (أ، إ، آ -> ا) والتاء المربوطة والهاء إذا لزم، وتوحيد الهمزات
-    text = re.sub(r'[إأآٱ]', 'ا', text)
-    text = re.sub(r'ى', 'ي', text)
-    text = re.sub(r'ؤ', 'و', text)
-    text = re.sub(r'ئ', 'ي', text)
-    # 3. إزالة الرموز، الفواصل، النقاط، الشرطات، والشرطات السفلية واستبدالها بمسافات
-    text = re.sub(r'[^\w\s]', ' ', text)
-    text = text.replace('_', ' ')
-    # 4. ضغط المسافات المتعددة وتحويل النص لأحرف صغيرة
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip().lower()
-
-# دالة البحث الذكية والدقيقة المطورة
+# دالة البحث الذكية والدقيقة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -138,27 +120,23 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # جلب جميع السجلات من قاعدة البيانات لنقوم بمطابقتها برمجياً بعد التطبيع الشامل
-    cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
-    all_records = cursor.fetchall()
+    # نجلب كل الكتب التي تبدأ بالكلمة المطلوبة لضمان عدم جلب كتب لها اسم مختلف في البداية (مثل "صور من")
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"{clean_query}%",))
+    results = cursor.fetchall()
+    
+    # كخطوة إضافية ذكية: إذا لم نجد تطابقاً كاملاً في البداية، نبحث عما إذا كان اسم الكتاب يتضمن الكلمة ولكن بشرط ألا يسبقها اسم كتاب آخر مختلف كلياً
+    if not results:
+        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
+        all_results = cursor.fetchall()
+        # فلترة النتائج لتجنب الكتب التي تبدأ بكلمات غريبة مثل "صور من" إذا كان البحث عن "حياة الصحابة"
+        forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
+        results = [
+            item for item in all_results 
+            if not any(item[0].strip().startswith(prefix) for prefix in forbidden_prefixes)
+        ]
+
     conn.close()
     
-    norm_query = normalize_arabic(clean_query)
-    results = []
-    
-    forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
-    
-    for book_name, msg_id in all_records:
-        norm_name = normalize_arabic(book_name)
-        
-        # استبعاد البدايات الممنوعة
-        if any(norm_name.startswith(normalize_arabic(prefix)) for prefix in forbidden_prefixes):
-            continue
-            
-        # المطابقة الذكية بعد إزالة الفواصل والتشكيل والشرطات
-        if norm_query in norm_name:
-            results.append((book_name, msg_id))
-
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
         valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
@@ -166,16 +144,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not valid_books:
             valid_books = [sorted_results[0]]
 
-        # منع تكرار إرسال الملفات التي تحمل نفس الاسم الحرفي 100%
-        seen_exact_names = set()
-        unique_books_to_send = []
         for book_name, msg_id in valid_books:
-            exact_name = book_name.strip()
-            if exact_name not in seen_exact_names:
-                seen_exact_names.add(exact_name)
-                unique_books_to_send.append((book_name, msg_id))
-
-        for book_name, msg_id in unique_books_to_send:
             try:
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
