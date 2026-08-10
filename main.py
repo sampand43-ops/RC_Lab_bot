@@ -37,7 +37,8 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• النظام يعمل الآن بفلترة تامة ومنع قاطع لأي تكرار."
+        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب وأجزائها بالتسلسل.\n"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء بدقة فائقة!"
     )
 
 # دالة السحب التلقائي من القناة
@@ -78,7 +79,7 @@ ARABIC_NUM_WORDS = {
 }
 
 def extract_part_number(filename):
-    match = re.search(r'(الجزء|المجلد|جـ?[\.\-\s]*|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
+    match = re.search(r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
     if match:
         val = match.group(2)
         if val in ARABIC_NUM_WORDS:
@@ -91,25 +92,11 @@ def extract_part_number(filename):
     if num_match:
         val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val.isdigit():
-            return int(val_en) if 'val_en' in locals() and val_en.isdigit() else int(val)
+            return int(val)
             
-    return 1
+    return 9999
 
-# دالة تنظيف النص واستثناء التشكيل والرموز والفواصل تماماً
-def normalize_arabic(text):
-    if not text:
-        return ""
-    text = re.sub(r'[\u064b-\u0652]', '', text)
-    text = re.sub(r'[إأآٱ]', 'ا', text)
-    text = re.sub(r'ى', 'ي', text)
-    text = re.sub(r'ؤ', 'و', text)
-    text = re.sub(r'ئ', 'ي', text)
-    text = re.sub(r'[^\w\s]', ' ', text)
-    text = text.replace('_', ' ')
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip().lower()
-
-# دالة البحث الذكية (التجمِع حسب اسم الملف لمنع أي تكرار نهائياً)
+# دالة البحث الذكية والدقيقة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -132,30 +119,32 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # التعديل الجذري هنا: التجميع حسب اسم الملف (book_name) لضمان عدم تكرار نفس الكتاب نهائياً
-    cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY book_name")
-    all_records = cursor.fetchall()
-    conn.close()
     
-    norm_query = normalize_arabic(clean_query)
-    results = []
+    # نجلب كل الكتب التي تبدأ بالكلمة المطلوبة لضمان عدم جلب كتب لها اسم مختلف في البداية (مثل "صور من")
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"{clean_query}%",))
+    results = cursor.fetchall()
     
-    forbidden_prefixes = ["قصص من", "مختصر", "شرح"]
-    norm_forbidden = [normalize_arabic(p) for p in forbidden_prefixes]
+    # كخطوة إضافية ذكية: إذا لم نجد تطابقاً كاملاً في البداية، نبحث عما إذا كان اسم الكتاب يتضمن الكلمة ولكن بشرط ألا يسبقها اسم كتاب آخر مختلف كلياً
+    if not results:
+        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
+        all_results = cursor.fetchall()
+        # فلترة النتائج لتجنب الكتب التي تبدأ بكلمات غريبة مثل "صور من" إذا كان البحث عن "حياة الصحابة"
+        forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
+        results = [
+            item for item in all_results 
+            if not any(item[0].strip().startswith(prefix) for prefix in forbidden_prefixes)
+        ]
 
-    for book_name, msg_id in all_records:
-        norm_name = normalize_arabic(book_name)
-        
-        if any(norm_name.startswith(p) for p in norm_forbidden):
-            continue
-            
-        if norm_name.startswith(norm_query):
-            results.append((book_name, msg_id))
+    conn.close()
     
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
+        valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
+        
+        if not valid_books:
+            valid_books = [sorted_results[0]]
 
-        for book_name, msg_id in sorted_results:
+        for book_name, msg_id in valid_books:
             try:
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
@@ -164,7 +153,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 )
                 await asyncio.sleep(0.5)
             except Exception as e:
-                print(f"Error forwarding message {msg_id}: {e}")
+                pass
     else:
         if update.effective_chat.type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
