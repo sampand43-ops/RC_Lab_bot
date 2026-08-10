@@ -37,8 +37,7 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب وأجزائها بالتسلسل وبدون أي تكرار.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء بدقة فائقة!"
+        "• النظام يعمل الآن بفلترة تامة ومنع قاطع لأي تكرار."
     )
 
 # دالة السحب التلقائي من القناة
@@ -110,7 +109,7 @@ def normalize_arabic(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip().lower()
 
-# دالة البحث الذكية والدقيقة (بدون أي تكرار قاطع)
+# دالة البحث الذكية (التجمِع حسب اسم الملف لمنع أي تكرار نهائياً)
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -133,7 +132,8 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
+    # التعديل الجذري هنا: التجميع حسب اسم الملف (book_name) لضمان عدم تكرار نفس الكتاب نهائياً
+    cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY book_name")
     all_records = cursor.fetchall()
     conn.close()
     
@@ -155,19 +155,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
 
-        # مانع التكرار الصارم لمنع إرسال أي ملف مكرر نهائياً
-        seen_msg_ids = set()
-        seen_file_names = set()
-        unique_books_to_send = []
-        
         for book_name, msg_id in sorted_results:
-            clean_name_key = normalize_arabic(book_name)
-            if msg_id not in seen_msg_ids and clean_name_key not in seen_file_names:
-                seen_msg_ids.add(msg_id)
-                seen_file_names.add(clean_name_key)
-                unique_books_to_send.append((book_name, msg_id))
-
-        for book_name, msg_id in unique_books_to_send:
             try:
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
@@ -191,9 +179,8 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي والمفلتر يعمل الآن بكفاءة وبدون تكرار...")
+    print("بوت البحث الذكي والمفلتر يعمل الآن بكفاءة...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
-
