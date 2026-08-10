@@ -27,8 +27,8 @@ def init_db():
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            book_name TEXT UNIQUE,
-            msg_id INTEGER
+            book_name TEXT,
+            msg_id INTEGER UNIQUE
         )
     """)
     conn.commit()
@@ -37,8 +37,8 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• تم ضبط نظام البحث والفلترة ليكون دقيقاً وشاملاً بدون أي تكرار.\n"
-        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال المطلوب بدقة تامة!"
+        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب وأجزائها بالتسلسل.\n"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء بدقة فائقة!"
     )
 
 # دالة السحب التلقائي من القناة
@@ -88,16 +88,15 @@ def extract_part_number(filename):
         if val_en.isdigit():
             return int(val_en)
             
-    num_match = re.search(r'[\s\-_]([0-9٠-٩]+|\([0-9٠-٩]+\))\s*(?:\.pdf|\.epub|\.zip)?$', filename)
+    num_match = re.search(r'[\s\-_]([0-9٠-٩]+)\s*(?:\.pdf|\.epub|\.zip)?$', filename)
     if num_match:
         val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
-        val_clean = re.sub(r'[()\s]', '', val)
-        if val_clean.isdigit():
-            return int(val_clean)
+        if val.isdigit():
+            return int(val)
             
     return 9999
 
-# دالة البحث والمعالجة الذكية والدقيقة
+# دالة البحث الذكية والدقيقة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -121,15 +120,18 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # استخدام البحث الشامل (من الجهتين %query%) لضمان إيجاد الكتاب بغض النظر عن موقع الكلمة (مثل حياة الصحابة)
-    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ?", (f"%{clean_query}%",))
+    # نجلب كل الكتب التي تبدأ بالكلمة المطلوبة لضمان عدم جلب كتب لها اسم مختلف في البداية (مثل "صور من")
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"{clean_query}%",))
     results = cursor.fetchall()
     
-    # تصفية الكلمات المحظورة إذا وُجدت نتائج غير مقصودة
-    if results:
+    # كخطوة إضافية ذكية: إذا لم نجد تطابقاً كاملاً في البداية، نبحث عما إذا كان اسم الكتاب يتضمن الكلمة ولكن بشرط ألا يسبقها اسم كتاب آخر مختلف كلياً
+    if not results:
+        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
+        all_results = cursor.fetchall()
+        # فلترة النتائج لتجنب الكتب التي تبدأ بكلمات غريبة مثل "صور من" إذا كان البحث عن "حياة الصحابة"
         forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
         results = [
-            item for item in results 
+            item for item in all_results 
             if not any(item[0].strip().startswith(prefix) for prefix in forbidden_prefixes)
         ]
 
@@ -137,18 +139,12 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
+        valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
         
-        # تفلترة برمجية قاطعة تمنع تماماً تكرار إرسال أي ملف يتطابق اسمه الحرفي
-        seen_exact_names = set()
-        unique_books_to_send = []
-        for book_name, msg_id in sorted_results:
-            exact_name = book_name.strip()
-            if exact_name not in seen_exact_names:
-                seen_exact_names.add(exact_name)
-                unique_books_to_send.append((book_name, msg_id))
+        if not valid_books:
+            valid_books = [sorted_results[0]]
 
-        # إرسال الملفات الفريدة فقط بدون أي تكرار وبفصل زمني آمن
-        for book_name, msg_id in unique_books_to_send:
+        for book_name, msg_id in valid_books:
             try:
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
@@ -172,7 +168,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت الأرشيف المحسّن يعمل بكفاءة تامة...")
+    print("بوت البحث الذكي والمفلتر يعمل الآن بكفاءة...")
     application.run_polling()
 
 if __name__ == "__main__":
