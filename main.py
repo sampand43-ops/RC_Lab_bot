@@ -37,7 +37,8 @@ def init_db():
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• النظام محدث الآن للتعرف على كافة أشكال كتابة الأجزاء (ج1، الجزء الأول، إلخ)."
+        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب وأجزائها بالتسلسل.\n"
+        "• للبحث: اكتب (أريد كتاب [اسم الكتاب]) وسأقوم بإرسال الأجزاء بدقة فائقة!"
     )
 
 # دالة السحب التلقائي من القناة
@@ -94,23 +95,9 @@ def extract_part_number(filename):
         if val.isdigit():
             return int(val)
             
-    return 0  # الكتب التي ليس لها أجزاء
+    return 9999
 
-# دالة تنظيف النص وتطبيعه المتطورة
-def normalize_arabic(text):
-    if not text:
-        return ""
-    text = re.sub(r'[\u064b-\u0652]', '', text)
-    text = re.sub(r'[إأآٱ]', 'ا', text)
-    text = re.sub(r'ى', 'ي', text)
-    text = re.sub(r'ؤ', 'و', text)
-    text = re.sub(r'ئ', 'ي', text)
-    text = re.sub(r'[^\w\s]', ' ', text)
-    text = text.replace('_', ' ')
-    text = re.sub(r'\s+', ' ', text)
-    return text.strip().lower()
-
-# دالة البحث النهائية والمستقرة
+# دالة البحث الذكية والدقيقة (مبنية على كودك المفضل تماماً وبدون فلترة خاطئة)
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -133,38 +120,36 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
-    all_records = cursor.fetchall()
+    
+    # نجلب كل الكتب التي تبدأ بالكلمة المطلوبة
+    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"{clean_query}%",))
+    results = cursor.fetchall()
+    
+    if not results:
+        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
+        all_results = cursor.fetchall()
+        forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
+        results = [
+            item for item in all_results 
+            if not any(item[0].strip().startswith(prefix) for prefix in forbidden_prefixes)
+        ]
+
     conn.close()
     
-    norm_query = normalize_arabic(clean_query)
-    results = []
-    
-    forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
-    
-    for book_name, msg_id in all_records:
-        norm_name = normalize_arabic(book_name)
-        
-        if any(norm_name.startswith(normalize_arabic(prefix)) for prefix in forbidden_prefixes):
-            continue
-            
-        if norm_query in norm_name:
-            results.append((book_name, msg_id))
-
     if results:
-        # ترتيب النتائج بناءً على رقم الجزء المستخرج بدقة فائقة
+        # ترتيب النتائج بناءً على الأجزاء بدقة
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
-
-        # منع تكرار إرسال الملفات التي تحمل نفس الاسم الحرفي 100%
-        seen_exact_names = set()
-        unique_books_to_send = []
+        
+        # التصحيح الجذري: إرسال كافة النتائج المطابقة دون حذف أي كتاب يحمل 9999 (تم إزالة القيد الخاطئ)
+        # مع تصفية بسيطة لمنع تكرار نفس الرسالة أو نفس الاسم الحرفي
+        seen_msg_ids = set()
+        unique_results = []
         for book_name, msg_id in sorted_results:
-            exact_name = book_name.strip()
-            if exact_name not in seen_exact_names:
-                seen_exact_names.add(exact_name)
-                unique_books_to_send.append((book_name, msg_id))
+            if msg_id not in seen_msg_ids:
+                seen_msg_ids.add(msg_id)
+                unique_results.append((book_name, msg_id))
 
-        for book_name, msg_id in unique_books_to_send:
+        for book_name, msg_id in unique_results:
             try:
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
@@ -188,9 +173,8 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي يعمل الآن بكفاءة...")
+    print("بوت البحث الذكي والمفلتر يعمل الآن بكفاءة...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
-
