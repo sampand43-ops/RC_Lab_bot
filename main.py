@@ -95,23 +95,23 @@ def extract_part_number(filename):
             
     return 0
 
-# دالة تنظيف النص الأساسية والمعدلة لاستثناء التشكيل والرموز بدقة
+# دالة تنظيف النص وتطبيعه (مع استثناء التشكيل والرموز والفواصل بدقة)
 def normalize_arabic(text):
     if not text:
         return ""
-    # إزالة التشكيل والحركات بالكامل
+    # إزالة علامات التشكيل والحركات بالكامل
     text = re.sub(r'[\u064b-\u0652]', '', text)
     text = re.sub(r'[إأآٱ]', 'ا', text)
     text = re.sub(r'ى', 'ي', text)
     text = re.sub(r'ؤ', 'و', text)
     text = re.sub(r'ئ', 'ي', text)
-    # استبدال الرموز والفواصل والشرطات بمسافات لضمان عدم تداخل الكلمات
+    # استبدال جميع الرموز، الفواصل، وعلامات الترقيم بمسافات لضمان عدم تداخل الكلمات
     text = re.sub(r'[^\w\s]', ' ', text)
     text = text.replace('_', ' ')
     text = re.sub(r'\s+', ' ', text)
     return text.strip().lower()
 
-# دالة البحث الذكية الخالية من التكرار (بنفس المنطق المفضل لديك)
+# دالة البحث الذكية الخالية من التكرار
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
