@@ -95,17 +95,15 @@ def extract_part_number(filename):
             
     return 0
 
-# دالة تنظيف النص وتطبيعه (مع استثناء التشكيل والرموز والفواصل بدقة)
+# دالة تنظيف النص وتطبيعه الشاملة
 def normalize_arabic(text):
     if not text:
         return ""
-    # إزالة علامات التشكيل والحركات بالكامل
     text = re.sub(r'[\u064b-\u0652]', '', text)
     text = re.sub(r'[إأآٱ]', 'ا', text)
     text = re.sub(r'ى', 'ي', text)
     text = re.sub(r'ؤ', 'و', text)
     text = re.sub(r'ئ', 'ي', text)
-    # استبدال جميع الرموز، الفواصل، وعلامات الترقيم بمسافات لضمان عدم تداخل الكلمات
     text = re.sub(r'[^\w\s]', ' ', text)
     text = text.replace('_', ' ')
     text = re.sub(r'\s+', ' ', text)
