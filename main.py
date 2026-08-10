@@ -96,6 +96,22 @@ def extract_part_number(filename):
             
     return 9999
 
+# دالة لتنظيف النص واستثناء التشكيل والفواصل والرموز تماماً
+def normalize_arabic(text):
+    if not text:
+        return ""
+    # إزالة التشكيل والحركات
+    text = re.sub(r'[\u064b-\u0652]', '', text)
+    text = re.sub(r'[إأآٱ]', 'ا', text)
+    text = re.sub(r'ى', 'ي', text)
+    text = re.sub(r'ؤ', 'و', text)
+    text = re.sub(r'ئ', 'ي', text)
+    # استبدال الفواصل والرموز والشرطات بمسافات
+    text = re.sub(r'[^\w\s]', ' ', text)
+    text = text.replace('_', ' ')
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip().lower()
+
 # دالة البحث الذكية والدقيقة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
@@ -120,22 +136,27 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # نجلب كل الكتب التي تبدأ بالكلمة المطلوبة لضمان عدم جلب كتب لها اسم مختلف في البداية (مثل "صور من")
-    cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"{clean_query}%",))
-    results = cursor.fetchall()
-    
-    # كخطوة إضافية ذكية: إذا لم نجد تطابقاً كاملاً في البداية، نبحث عما إذا كان اسم الكتاب يتضمن الكلمة ولكن بشرط ألا يسبقها اسم كتاب آخر مختلف كلياً
-    if not results:
-        cursor.execute("SELECT book_name, msg_id FROM archive WHERE book_name LIKE ? GROUP BY msg_id", (f"%{clean_query}%",))
-        all_results = cursor.fetchall()
-        # فلترة النتائج لتجنب الكتب التي تبدأ بكلمات غريبة مثل "صور من" إذا كان البحث عن "حياة الصحابة"
-        forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
-        results = [
-            item for item in all_results 
-            if not any(item[0].strip().startswith(prefix) for prefix in forbidden_prefixes)
-        ]
-
+    # جلب جميع السجلات من القاعدة لعمل المطابقة الذكية بعد تنظيف النصوص
+    cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
+    all_records = cursor.fetchall()
     conn.close()
+    
+    norm_query = normalize_arabic(clean_query)
+    results = []
+    
+    forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
+    norm_forbidden = [normalize_arabic(p) for p in forbidden_prefixes]
+
+    for book_name, msg_id in all_records:
+        norm_name = normalize_arabic(book_name)
+        
+        # استثناء البادئات الممنوعة
+        if any(norm_name.startswith(p) for p in norm_forbidden):
+            continue
+            
+        # المطابقة الذكية التي تتجاهل التشكيل والرموز والفواصل
+        if norm_query in norm_name:
+            results.append((book_name, msg_id))
     
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
