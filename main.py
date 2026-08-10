@@ -79,7 +79,6 @@ ARABIC_NUM_WORDS = {
 }
 
 def extract_part_number(filename):
-    # تحسين التعبير النمطي لالتقاط جميع أشكال كتابة الأجزاء (مثل جـ.1 أو جـ1 أو الجزء الأول)
     match = re.search(r'(الجزء|المجلد|جـ?[\.\-\s]*|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
     if match:
         val = match.group(2)
@@ -93,9 +92,8 @@ def extract_part_number(filename):
     if num_match:
         val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val.isdigit():
-            return int(val)
+            return int(val_en) if 'val_en' in locals() and val_en.isdigit() else int(val)
             
-    # إذا لم يجد رقم جزء، نعطيه رقماً افتراضياً (1) بدلاً من استبعاده تماماً
     return 1
 
 # دالة تنظيف النص واستثناء التشكيل والرموز والفواصل تماماً
@@ -112,7 +110,7 @@ def normalize_arabic(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip().lower()
 
-# دالة البحث الذكية والدقيقة
+# دالة البحث الذكية والدقيقة (تبدأ من بداية اسم الكتاب حصراً)
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     
@@ -143,7 +141,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     norm_query = normalize_arabic(clean_query)
     results = []
     
-    # تم حذف "صور من" بناءً على طلبك لكي يظهر الكتاب بشكل طبيعي
     forbidden_prefixes = ["قصص من", "مختصر", "شرح"]
     norm_forbidden = [normalize_arabic(p) for p in forbidden_prefixes]
 
@@ -153,11 +150,11 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if any(norm_name.startswith(p) for p in norm_forbidden):
             continue
             
-        if norm_query in norm_name:
+        # الشرط الحاسم: يجب أن يبدأ اسم الكتاب بكلمة البحث تماماً لكي لا يجلب كتباً تسبقها كلمات أخرى
+        if norm_name.startswith(norm_query):
             results.append((book_name, msg_id))
     
     if results:
-        # ترتيب النتائج تصاعدياً حسب رقم الجزء المستخرج
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
 
         for book_name, msg_id in sorted_results:
