@@ -486,3 +486,4 @@ def search_and_forward(message):
 if __name__ == "__main__":
     print("البوت يعمل وتصلحت مشكلة البحث بالرموز...")
     bot.infinity_polling()
+
