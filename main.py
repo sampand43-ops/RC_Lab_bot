@@ -61,6 +61,8 @@ ADMIN_WELCOME_TEXT = (
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    
+    # 1. إنشاء الجداول الأساسية
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -75,8 +77,20 @@ def init_db():
             added_by INTEGER
         )
     """)
+    
+    # 2. ترقية قاعدة البيانات إذا كانت قديمة وحذف عدم وجود العمود
+    try:
+        cursor.execute("ALTER TABLE archive ADD COLUMN file_unique_id TEXT;")
+    except sqlite3.OperationalError:
+        pass  # العمود موجود بالفعل
+        
+    # 3. إنشاء الفهارس لسرعة البحث
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_book_name ON archive(book_name);")
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_uid ON archive(file_unique_id);")
+    try:
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_uid ON archive(file_unique_id);")
+    except sqlite3.OperationalError:
+        pass
+
     conn.commit()
     conn.close()
 
@@ -317,7 +331,6 @@ async def generate_pdf_report(chat_id: int, user_id: int, context: ContextTypes.
             reply_markup=get_admin_keyboard()
         )
 
-# وظائف حذف الأرشيف
 def delete_all_records():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -618,7 +631,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if text.startswith('/'):
         return
 
-    # معالجة إدخال عدد الكتب المراد حذفها للمشرف
     if chat_type == 'private' and user_id in ADMIN_IDS and context.user_data.get('awaiting_delete_count'):
         if text.isdigit():
             count = int(text)
