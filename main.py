@@ -21,16 +21,16 @@ DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 # معرف قناتك الثابت
 CHANNEL_ID = -1004395670008
 
-# قائمة مشرفي البوت المصرح لهم بإضافته للمجموعات
+# قائمة مشرفي البوت
 ADMIN_IDS = [7898871921]
 
-# معرف البوت وبيانات المجموعة الرئيسية
+# معرف البوت وبيانات المجموعة المسموح لها فقط
 BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
-ALLOWED_GROUP_USERNAME = "reading_community_group"  # معرف المجموعة الرئيسية
+ALLOWED_GROUP_USERNAME = "reading_community_group"  # اليوزر نيم الخاص بالمجموعة المصرح لها
 
-# نص التقييد والاعتذار
+# نص التقييد للخاص
 RESTRICTED_TEXT = (
     f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
     f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه."
@@ -39,7 +39,6 @@ RESTRICTED_TEXT = (
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # جدول الأرشيف
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,37 +46,18 @@ def init_db():
             msg_id INTEGER UNIQUE
         )
     """)
-    # جدول المجموعات المسموح لها (التي يضيفها المشرف)
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS allowed_groups (
-            chat_id INTEGER PRIMARY KEY,
-            added_by INTEGER
-        )
-    """)
     conn.commit()
     conn.close()
 
-# دالة للتحقق من السماح للمجموعة من قاعدة البيانات أو اليوزرنيم
-def is_group_approved(chat_id: int, chat_username: str) -> bool:
-    if chat_username and chat_username.lower() == ALLOWED_GROUP_USERNAME.lower():
-        return True
-    
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT 1 FROM allowed_groups WHERE chat_id = ?", (chat_id,))
-    row = cursor.fetchone()
-    conn.close()
-    
-    return bool(row)
-
-# دالة الفحص والمغادرة عند الحاجة
+# دالة للتحقق مما إذا كانت المجموعة هي المجموعة المسموح لها فقط
 async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat = update.effective_chat
     if chat.type in ['group', 'supergroup']:
-        if is_group_approved(chat.id, chat.username):
+        # التحقق عن طريق username المجموعة
+        if chat.username and chat.username.lower() == ALLOWED_GROUP_USERNAME.lower():
             return True
         else:
-            # مغادرة المجموعات غير المعتمدة
+            # رسالة اعتذار ومغادرة المجموعات الخارجية متضمنة اسم المجموعة والرابط
             try:
                 group_leave_text = (
                     f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
@@ -96,32 +76,11 @@ async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return False
     return True
 
-# التعامل مع إضافة البوت لمجموعة جديدة
+# التعامل مع إضافة البوت لمجموعة جديدة فوراً
 async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat = update.effective_chat
-    user_id = update.message.from_user.id if update.message and update.message.from_user else None
-
     for member in update.message.new_chat_members:
         if member.id == context.bot.id:
-            # 1. إذا كانت المجموعة هي الرئيسية
-            if chat.username and chat.username.lower() == ALLOWED_GROUP_USERNAME.lower():
-                return
-            
-            # 2. إذا قام المشرف المعتمد بالإضافة
-            if user_id in ADMIN_IDS:
-                conn = sqlite3.connect(DB_PATH)
-                cursor = conn.cursor()
-                cursor.execute("INSERT OR IGNORE INTO allowed_groups (chat_id, added_by) VALUES (?, ?)", (chat.id, user_id))
-                conn.commit()
-                conn.close()
-                
-                await context.bot.send_message(
-                    chat_id=chat.id,
-                    text="أهلاً بكم! 📚🤖\nتم تفعيل البوت بنجاح لهذه المجموعة بواسطة المشرف."
-                )
-            # 3. إذا أضافه عضو آخر غير المشرف -> رفض ومغادرة
-            else:
-                await is_allowed_group(update, context)
+            await is_allowed_group(update, context)
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -136,7 +95,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "أهلاً بك يا هندسة في لوحة تحكم البوت! 📚🤖\n"
                 "• يمكنك البحث واستعراض الأرشيف هنا بحرية بصفتك المشرف.\n"
-                "• يمكنك إضافة البوت لأي مجموعة جديدة وسيعمل فيها تلقائياً."
+                "• البوت يعمل في المجموعة لخدمة جميع الأعضاء تلقائياً."
             )
         else:
             await update.message.reply_text(
@@ -244,7 +203,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         clean_query = text
 
-    # 2. المعالجة داخل المجموعات
+    # 2. المعالجة داخل المجموعات (شاملة حماية المجموعة)
     elif chat_type in ['group', 'supergroup']:
         if not await is_allowed_group(update, context):
             return
@@ -343,7 +302,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي يعمل؛ صلاحيات الإضافة محصورة بالمشرف فقط...")
+    print("بوت البحث الذكي يعمل ورسائل الحماية محدثة بنجاح...")
     application.run_polling()
 
 if __name__ == "__main__":
