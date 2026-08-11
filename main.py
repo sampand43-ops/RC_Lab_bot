@@ -35,15 +35,14 @@ DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 FONT_PATH = os.path.join(DATA_DIR, "Amiri-Regular.ttf")
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf"
 
+# معرف القناة الرقمي المباشر والدقيق
 CHANNEL_ID = -1004395670008
 ADMIN_IDS = [7898871921, 1937491557]
 
-# تم تعديل معرف البوت ليطابق المعرف الحقيقي
 BOT_USERNAME = "RCGivvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
 
-# متغير عام للتحكم الفوري بالإيقاف لكل شات
 CANCEL_SYNC_REQUESTS = {}
 
 RESTRICTED_TEXT = (
@@ -76,7 +75,8 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             book_name TEXT,
             msg_id INTEGER UNIQUE,
-            file_unique_id TEXT UNIQUE
+            file_unique_id TEXT UNIQUE,
+            file_id TEXT
         )
     """)
     cursor.execute("""
@@ -88,6 +88,11 @@ def init_db():
     
     try:
         cursor.execute("ALTER TABLE archive ADD COLUMN file_unique_id TEXT;")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cursor.execute("ALTER TABLE archive ADD COLUMN file_id TEXT;")
     except sqlite3.OperationalError:
         pass
         
@@ -191,7 +196,6 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
 
     msg_id = start_id
     while msg_id <= end_id:
-        # فحص فوري للإيقاف
         if CANCEL_SYNC_REQUESTS.get(chat_id, False):
             conn.commit()
             conn.close()
@@ -220,6 +224,7 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
             if document:
                 book_name = document.file_name or fwd_msg.caption or "Unknown_Book"
                 file_uid = document.file_unique_id
+                raw_file_id = document.file_id
 
                 cursor.execute(
                     "SELECT 1 FROM archive WHERE file_unique_id = ? OR book_name = ?", 
@@ -229,8 +234,8 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
                     skipped_duplicates += 1
                 else:
                     cursor.execute(
-                        "INSERT OR IGNORE INTO archive (book_name, msg_id, file_unique_id) VALUES (?, ?, ?)",
-                        (book_name, msg_id, file_uid)
+                        "INSERT OR IGNORE INTO archive (book_name, msg_id, file_unique_id, file_id) VALUES (?, ?, ?, ?)",
+                        (book_name, msg_id, file_uid, raw_file_id)
                     )
                     added_count += 1
             
@@ -594,6 +599,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=True
             )
 
+# دالة لالتقاط أي منشور كتاب جديد ينزل بالقناة تلقائياً
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
     if message:
@@ -603,13 +609,14 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         if document:
             book_name = document.file_name or message.caption or "Unknown_Book"
             file_uid = document.file_unique_id
+            raw_file_id = document.file_id
             
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             try:
                 cursor.execute(
-                    "INSERT OR IGNORE INTO archive (book_name, msg_id, file_unique_id) VALUES (?, ?, ?)",
-                    (book_name, msg_id, file_uid)
+                    "INSERT OR IGNORE INTO archive (book_name, msg_id, file_unique_id, file_id) VALUES (?, ?, ?, ?)",
+                    (book_name, msg_id, file_uid, raw_file_id)
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -742,16 +749,15 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
+    cursor.execute("SELECT book_name, msg_id, file_id FROM archive GROUP BY msg_id")
     all_records = cursor.fetchall()
     conn.close()
     
     results = []
-    
-    for book_name, msg_id in all_records:
+    for book_name, msg_id, file_id in all_records:
         norm_name = normalize_arabic(book_name)
         if norm_query in norm_name:
-            results.append((book_name, msg_id))
+            results.append((book_name, msg_id, file_id))
     
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
@@ -761,7 +767,21 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             valid_books = [sorted_results[0]]
 
         sent_any = False
-        for book_name, msg_id in valid_books:
+        for book_name, msg_id, file_id in valid_books:
+            # 1️⃣ تجربة الإرسال المباشر عن طريق file_id (سريع ومباشر ودون الحاجة للتوجيه)
+            if file_id:
+                try:
+                    await context.bot.send_document(
+                        chat_id=update.effective_chat.id,
+                        document=file_id
+                    )
+                    sent_any = True
+                    await asyncio.sleep(0.5)
+                    continue
+                except Exception as e:
+                    print(f"خطأ في الإرسال بـ file_id: {e}")
+            
+            # 2️⃣ التجربة الاحتياطية: التوجيه المباشر عبر معرف القناة الرقمي CHANNEL_ID
             try:
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
@@ -771,10 +791,13 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 sent_any = True
                 await asyncio.sleep(0.5)
             except Exception as e:
-                print(f"خطأ أثناء توجيه الرسالة {msg_id}: {e}")
+                print(f"خطأ في توجيه الرسالة {msg_id}: {e}")
 
         if not sent_any:
-            await update.message.reply_text("⚠️ تعذر إرسال الملف من القناة، يرجى التأكد من إضافة البوت كـ مشرف (Admin) داخل قناة الكتب وحفظ التغييرات.")
+            await update.message.reply_text(
+                "⚠️ تعذر توجيه أو إرسال الملف.\n\n"
+                "يرجى إعادة أرشفة القناة للدفعة المطلوبة لتنظيف السجلات وحفظ المعرفات المباشرة."
+            )
     else:
         if chat_type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
@@ -793,7 +816,10 @@ def main():
     application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
+    
+    # التقاط الكتب والملفات المرسلة حديثاً للقناة تلقائياً
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
+    
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
     print("البوت جاهز ويعمل بالكامل...")
