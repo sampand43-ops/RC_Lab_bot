@@ -44,24 +44,25 @@ LEAVE_TEXT = (
 ADMIN_WELCOME_TEXT = (
     "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
     "بصفتك مشرفاً رئيسياً للنظام، تتوفر لك الصلاحيات الكاملة لجميع الخصائص.\n\n"
-    "🔄 *لأرشفة الكتب القديمة قبل انضمام البوت:* أرسل الأمر `/sync` أو `/sync 1 2000`\n"
-    "💡 للحصول على دليل التعليمات وتقسيم الصلاحيات التفصيلي، أرسل الأمر: /help\n\n"
+    "🔄 *لأرشفة الكتب القديمة:* أرسل الأمر `/sync` أو `/sync 1 2000`\n"
+    "📊 *عرض القائمة والإحصائيات:* أرسل الأمر `/stats`\n"
+    "💡 للحصول على دليل التعليمات وتقسيم الصلاحيات، أرسل الأمر: /help\n\n"
     "البوت قيد التشغيل وجاهز لخدمتك ✨"
 )
 
 ADMIN_HELP_TEXT = (
     "📌 *دليل استخدام البوت وتقسيم الصلاحيات*\n\n"
     "━━━━━━ 👑 *صلاحيات المشرف* ━━━━━━\n\n"
-    "• *أرشفة الكتب القديمة (`/sync`):* يمكنك كتابة `/sync` لفحص القناة واستخراج جميع الكتب والملفات التي تم رفعها قبل انضمام البوت.\n\n"
+    "• *عرض قائمة الكتب والعدد (`/stats`):* يُرسل لك إحصائية الإرشيف وملف يحتوي على جميع أسماء الكتب المحفوظة.\n\n"
+    "• *أرشفة الكتب القديمة (`/sync`):* يفحص القناة ويستخرج جميع الكتب والملفات السابقة.\n\n"
     "• *تفعيل المجموعات:* يمكنك إضافة البوت لأي مجموعة جديدة لتفعيلها تلقائياً واستخدامها من قِبل الأعضاء.\n\n"
     "• *البحث الحر في الخاص:* يمكنك البحث واستخراج أي كتاب مباشرة من محادثة البوت الخاصة دون أي قيود.\n\n"
-    "• *الأرشفة الآلية:* بمجرد رفع أي ملف جديد في القناة المربوطة، يتم حفظه وتكشيفه بداخل قاعدة البيانات فوراً.\n\n"
     "━━━━━━ 👥 *صلاحيات وإرشادات الأعضاء* ━━━━━━\n\n"
     "• *الاستخدام المقيّد:* يقتصر استخدام الأعضاء للبوت على المجموعات المعتمدة التي قمت بتفعيلها فقط.\n\n"
     "• *طرق البحث المتاحة:* يمكن للعضو البحث داخل المجموعة عن طريق:\n"
     "  1️⃣ الإشارة للبوت: `@RCGivvvv_bot اسم الكتاب`\n"
     "  2️⃣ أو عمل رد (Reply) على أي رسالة للبوت بكتابة اسم الكتاب.\n\n"
-    "• *المنع التلقائي:* لا يمكن للأعضاء استخدام البوت في المحادثات الخاصة أو إضافته لمجموعات خارجية، وسيقوم البوت باعتذار ومغادرة تلقائية."
+    "• *المنع التلقائي:* لا يمكن للأعضاء استخدام البوت في المحادثات الخاصة أو إضافته لمجموعات خارجية."
 )
 
 def init_db():
@@ -177,6 +178,44 @@ async def sync_channel_history(update: Update, context: ContextTypes.DEFAULT_TYP
 
     conn.close()
     await status_msg.edit_text(f"✅ *اكتملت عملية الأرشفة بنجاح!*\n\n📊 *التقرير:*\n• الرسائل المفحوصة: {scanned_count}\n• الكتب المضافة للأرشيف: {added_count}", parse_mode="Markdown")
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if update.effective_chat.type != 'private' or user_id not in ADMIN_IDS:
+        return
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT book_name, msg_id FROM archive ORDER BY id ASC")
+    records = cursor.fetchall()
+    conn.close()
+
+    total_count = len(records)
+    if total_count == 0:
+        await update.message.reply_text("📂 الأرشيف فارغ حالياً. يمكنك استخدام الأمر `/sync` للبدء بالأرشفة.", parse_mode="Markdown")
+        return
+
+    # إنشاء ملف نصي يحتوي على جميع أسماء الكتب
+    file_path = os.path.join(DATA_DIR, "archived_books.txt")
+    with open(file_path, "w", encoding="utf-8") as f:
+        f.write(f"📚 قائمة الكتب المؤرشفة بداخل البوت (الإجمالي: {total_count} كتاب)\n")
+        f.write("=" * 50 + "\n\n")
+        for idx, (book_name, msg_id) in enumerate(records, start=1):
+            f.write(f"{idx}. {book_name} (Msg ID: {msg_id})\n")
+
+    await update.message.reply_text(
+        f"📊 *إحصائيات الأرشيف الحالي:*\n\n"
+        f"• *عدد الكتب المحفوظة بالكامل:* {total_count} كتاب 📚\n\n"
+        f"📎 تم إرفاق ملف نصي يحتوي على جميع أسماء الكتب المسجلة بداخل قاعدة البيانات.",
+        parse_mode="Markdown"
+    )
+
+    with open(file_path, "rb") as doc:
+        await context.bot.send_document(
+            chat_id=user_id,
+            document=doc,
+            filename="قائمة_الكتب_المؤرشفة.txt"
+        )
 
 async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -466,12 +505,13 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("sync", sync_channel_history))
+    application.add_handler(CommandHandler("stats", stats_command))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("البوت جاهز ويعمل مع دعم الأرشفة السابقة (/sync)...")
+    print("البوت جاهز ويعمل مع دعم إحصائيات وتصدير القائمة (/stats)...")
     application.run_polling()
 
 if __name__ == "__main__":
