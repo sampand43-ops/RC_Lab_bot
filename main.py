@@ -22,7 +22,7 @@ DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 CHANNEL_ID = -1004395670008
 
 # قائمة مشرفي البوت المصرح لهم حصراً بإضافته للمجموعات
-ADMIN_IDS = [7898871921]
+ADMIN_IDS = [7898871921, 1937491557]
 
 # معرف البوت وبيانات المجموعة الرئيسية
 BOT_USERNAME = "RCGivvvv_bot"
@@ -43,7 +43,7 @@ LEAVE_TEXT = (
 
 ADMIN_WELCOME_TEXT = (
     "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
-    "بصفتك المشرف الرئيسي للنظام، تتوفر لك الصلاحيات الكاملة لجميع الخصائص.\n\n"
+    "بصفتك مشرفاً رئيسياً للنظام، تتوفر لك الصلاحيات الكاملة لجميع الخصائص.\n\n"
     "💡 للحصول على دليل التعليمات وتقسيم الصلاحيات التفصيلي، أرسل الأمر: /help\n\n"
     "البوت قيد التشغيل وجاهز لخدمتك ✨"
 )
@@ -404,7 +404,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("البوت جاهز مع تنسيق دليل الصلاحيات الجديد والموسع...")
+    print("البوت جاهز ويعمل مع المشرفين المعتمدين...")
     application.run_polling()
 
 if __name__ == "__main__":
