@@ -24,14 +24,15 @@ CHANNEL_ID = -1004395670008
 # قائمة مشرفي البوت
 ADMIN_IDS = [7898871921]
 
-# معرف البوت وبيانات المجموعة
+# معرف البوت وبيانات المجموعة المسموح لها فقط
 BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
+ALLOWED_GROUP_USERNAME = "reading_community_group"  # اليوزر نيم الخاص بالمجموعة المصرح لها
 
 # نص التقييد للخاص
 RESTRICTED_TEXT = (
-    f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي.\n\n"
+    f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
     f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه."
 )
 
@@ -48,9 +49,46 @@ def init_db():
     conn.commit()
     conn.close()
 
+# دالة للتحقق مما إذا كانت المجموعة هي المجموعة المسموح لها فقط
+async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    chat = update.effective_chat
+    if chat.type in ['group', 'supergroup']:
+        # التحقق عن طريق username المجموعة
+        if chat.username and chat.username.lower() == ALLOWED_GROUP_USERNAME.lower():
+            return True
+        else:
+            # رسالة اعتذار ومغادرة المجموعات الخارجية متضمنة اسم المجموعة والرابط
+            try:
+                group_leave_text = (
+                    f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
+                    f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه.\n\n"
+                    f"سأقوم بالمغادرة الآن..."
+                )
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text=group_leave_text,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True
+                )
+                await context.bot.leave_chat(chat.id)
+            except Exception:
+                pass
+            return False
+    return True
+
+# التعامل مع إضافة البوت لمجموعة جديدة فوراً
+async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    for member in update.message.new_chat_members:
+        if member.id == context.bot.id:
+            await is_allowed_group(update, context)
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
+
+    if chat_type in ['group', 'supergroup']:
+        if not await is_allowed_group(update, context):
+            return
 
     if chat_type == 'private':
         if user_id in ADMIN_IDS:
@@ -165,8 +203,11 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         clean_query = text
 
-    # 2. المعالجة داخل المجموعات (شاملة الرد والإشارة)
+    # 2. المعالجة داخل المجموعات (شاملة حماية المجموعة)
     elif chat_type in ['group', 'supergroup']:
+        if not await is_allowed_group(update, context):
+            return
+
         is_reply_to_bot = (
             update.message.reply_to_message 
             and update.message.reply_to_message.from_user 
@@ -176,17 +217,14 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         mention_pattern = rf'@{re.escape(BOT_USERNAME)}'
         has_mention = bool(re.search(mention_pattern, text, re.IGNORECASE))
 
-        # إذا لم يكن رداً على البوت ولم يحتوي على إشارة البوت -> تجاهل الرسالة تماماً
         if not (is_reply_to_bot or has_mention):
             return
 
-        # تنظيف النص واستخراج اسم الكتاب
         clean_query = re.sub(mention_pattern, '', text, flags=re.IGNORECASE).strip()
 
     else:
         return
 
-    # إزالة الكلمات الزائدة إن وجدت
     phrases_to_remove = [
         "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
         "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب", 
@@ -204,7 +242,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     norm_query = normalize_arabic(clean_query)
 
-    # حماية من النقاط والرموز المفردة
     if not norm_query or len(norm_query) < 2:
         if chat_type == 'private':
             await update.message.reply_text("⚠️ يرجى كتابة اسم كتاب أو كلمة بحث صالحة تحتوي على أحرف.")
@@ -251,7 +288,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception as e:
                 pass
     else:
-        # إظهار رسالة عدم العثور فقط في الخاص لتفادي إزعاج المجموعة
         if chat_type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
 
@@ -262,10 +298,11 @@ def main():
     application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي يعمل بالرد والإشارة بنجاح...")
+    print("بوت البحث الذكي يعمل ورسائل الحماية محدثة بنجاح...")
     application.run_polling()
 
 if __name__ == "__main__":
