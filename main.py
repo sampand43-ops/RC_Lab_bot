@@ -29,7 +29,7 @@ BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
 
-# النصوص المحدثة بحسب طلبك
+# النصوص
 RESTRICTED_TEXT = (
     f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
     f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه."
@@ -44,7 +44,6 @@ LEAVE_TEXT = (
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # جدول الأرشيف
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -52,7 +51,6 @@ def init_db():
             msg_id INTEGER UNIQUE
         )
     """)
-    # جدول المجموعات المسموح لها (التي يضيفها المشرف حصراً)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS allowed_groups (
             chat_id INTEGER PRIMARY KEY,
@@ -62,7 +60,6 @@ def init_db():
     conn.commit()
     conn.close()
 
-# دالة للتحقق من وجود المجموعة في قاعدة البيانات
 def is_group_approved(chat_id: int) -> bool:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -71,7 +68,7 @@ def is_group_approved(chat_id: int) -> bool:
     conn.close()
     return bool(row)
 
-# دالة الفحص والمغادرة عند الحاجة
+# دالة الفحص والمغادرة (معدلة للحماية من أخطاء الصلاحيات)
 async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat = update.effective_chat
     if chat and chat.type in ['group', 'supergroup']:
@@ -85,9 +82,13 @@ async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     parse_mode="Markdown",
                     disable_web_page_preview=True
                 )
-                await context.bot.leave_chat(chat.id)
             except Exception:
                 pass
+            finally:
+                try:
+                    await context.bot.leave_chat(chat.id)
+                except Exception:
+                    pass
             return False
     return True
 
@@ -109,12 +110,15 @@ async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 conn.commit()
                 conn.close()
                 
-                await context.bot.send_message(
-                    chat_id=chat.id,
-                    text="أهلاً بكم! 📚🤖\nتم تفعيل البوت بنجاح لهذه المجموعة بواسطة المشرف."
-                )
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        text="أهلاً بكم! 📚🤖\nتم تفعيل البوت بنجاح لهذه المجموعة بواسطة المشرف."
+                    )
+                except Exception:
+                    pass
             else:
-                # إذا قام أي عضو آخر بإضافته -> مرفوض ومغادرة فورية
+                # إذا قام أي عضو آخر بإضافته -> حاول إرسال الاعتذار ثم اخرج فوراً بجميع الأحوال
                 try:
                     await context.bot.send_message(
                         chat_id=chat.id,
@@ -122,11 +126,14 @@ async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         parse_mode="Markdown",
                         disable_web_page_preview=True
                     )
-                    await context.bot.leave_chat(chat.id)
                 except Exception:
                     pass
+                finally:
+                    try:
+                        await context.bot.leave_chat(chat.id)
+                    except Exception:
+                        pass
 
-# تنظيف قاعدة البيانات فور مغادرة البوت أو إزالته من المجموعة
 async def on_bot_left_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.left_chat_member:
         if update.message.left_chat_member.id == context.bot.id:
@@ -167,7 +174,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-# دالة السحب التلقائي من القناة
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
     if message:
@@ -190,7 +196,6 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             finally:
                 conn.close()
 
-# قاموس الأرقام
 ARABIC_NUM_WORDS = {
     'الأول': 1, 'اول': 1, '1': 1,
     'الثاني': 2, 'ثاني': 2, '2': 2,
@@ -235,7 +240,6 @@ def normalize_arabic(text):
     text = re.sub(r'\s+', ' ', text)
     return text.strip().lower()
 
-# دالة البحث المفلترة والمعالجة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -247,7 +251,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if text.startswith('/'):
         return
 
-    # 1. المعالجة في المحادثة الخاصة
     if chat_type == 'private':
         if user_id not in ADMIN_IDS:
             await update.message.reply_text(
@@ -258,7 +261,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
         clean_query = text
 
-    # 2. المعالجة داخل المجموعات
     elif chat_type in ['group', 'supergroup']:
         if not await is_allowed_group(update, context):
             return
@@ -340,7 +342,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     message_id=msg_id
                 )
                 await asyncio.sleep(0.5)
-            except Exception as e:
+            except Exception:
                 pass
     else:
         if chat_type == 'private':
@@ -358,7 +360,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي يعمل؛ تم تحديث نص الاعتذار والمغادرة...")
+    print("بوت البحث يعمل بمرونة وصلاحيات معالجة محسّنة للمجموعات العامة والخاصة...")
     application.run_polling()
 
 if __name__ == "__main__":
