@@ -54,15 +54,19 @@ LEAVE_TEXT = (
 )
 
 ADMIN_WELCOME_TEXT = (
-    "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
-    "يمكنك إدارة الأرشيف، إظهار الإحصائيات، تصدير التقارير، أو حذف الكتب باستخدام الأزرار أدناه."
+    f"أهلاً بك في لوحة تحكم بوت أرشيف [{GROUP_NAME}]({GROUP_LINK}) 📚⚙️\n\n"
+    "**تعليمات استخدام البوت للمشرفين:**\n"
+    "• **عرض الإحصائيات:** لمعرفة إجمالي الكتب ورقم آخر رسالة محفوظة.\n"
+    "• **تصدير تقرير (PDF):** لتوليد ملف يحتوي على قائمة جميع الكتب المؤرشفة.\n"
+    "• **الأرشفة:** اختيار إحدى الدفعات لبدء فحص وحفظ الكتب تلقائياً مع إمكانية إلغاء العملية بأي وقت عبر زر الإيقاف.\n"
+    "• **حذف الأرشيف / عدد محدد:** لإدارة وتطهير السجلات أو مسح أحدث كتب مضافة.\n\n"
+    "استخدم الأزرار أدناه للتحكم:"
 )
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # 1. إنشاء الجداول الأساسية
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,13 +82,11 @@ def init_db():
         )
     """)
     
-    # 2. ترقية قاعدة البيانات إذا كانت قديمة وحذف عدم وجود العمود
     try:
         cursor.execute("ALTER TABLE archive ADD COLUMN file_unique_id TEXT;")
     except sqlite3.OperationalError:
-        pass  # العمود موجود بالفعل
+        pass
         
-    # 3. إنشاء الفهارس لسرعة البحث
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_book_name ON archive(book_name);")
     try:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_uid ON archive(file_unique_id);")
@@ -155,6 +157,10 @@ def get_admin_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
+def get_cancel_sync_keyboard():
+    keyboard = [[InlineKeyboardButton("🛑 إيقاف الأرشفة الآن", callback_data="stop_sync")]]
+    return InlineKeyboardMarkup(keyboard)
+
 def get_confirm_delete_keyboard():
     keyboard = [
         [
@@ -165,9 +171,11 @@ def get_confirm_delete_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: int, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['sync_cancelled'] = False
     status_msg = await context.bot.send_message(
         chat_id=chat_id,
-        text=f"⏳ جاري بدء أرشفة القناة للدفعة ({start_id:,} إلى {end_id:,})...\nيرجى الانتظار."
+        text=f"⏳ جاري بدء أرشفة القناة للدفعة ({start_id:,} إلى {end_id:,})...\nيرجى الانتظار.",
+        reply_markup=get_cancel_sync_keyboard()
     )
     
     added_count = 0
@@ -179,6 +187,20 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
 
     msg_id = start_id
     while msg_id <= end_id:
+        if context.user_data.get('sync_cancelled'):
+            conn.commit()
+            conn.close()
+            await status_msg.edit_text(
+                f"🛑 *تم إيقاف عملية الأرشفة بناءً على طلبك!*\n\n"
+                f"📊 *النتائج حتى لحظة الإيقاف:*\n"
+                f"• الرسائل المفحوصة: {scanned_count:,}\n"
+                f"• الكتب الجديدة المضافة: {added_count:,}\n"
+                f"• المكررة المتجاوزة: {skipped_duplicates:,}",
+                parse_mode="Markdown",
+                reply_markup=get_admin_keyboard()
+            )
+            return
+
         try:
             fwd_msg = await context.bot.forward_message(
                 chat_id=user_id,
@@ -219,7 +241,8 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
                         f"⏳ جاري الأرشفة...\n"
                         f"• تم فحص: {scanned_count:,}\n"
                         f"• كتب جديدة: {added_count:,}\n"
-                        f"• مكرر ومتجاوز: {skipped_duplicates:,}"
+                        f"• مكرر ومتجاوز: {skipped_duplicates:,}",
+                        reply_markup=get_cancel_sync_keyboard()
                     )
                 except Exception:
                     pass
@@ -371,6 +394,10 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         end_id = int(parts[2])
         asyncio.create_task(run_sync_process(chat_id, user_id, start_id, end_id, context))
 
+    elif data == "stop_sync":
+        context.user_data['sync_cancelled'] = True
+        await query.message.reply_text("⏳ جاري إيقاف عملية الأرشفة...")
+
     elif data == "show_stats":
         asyncio.create_task(show_stats_text(chat_id, context))
 
@@ -509,6 +536,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in ADMIN_IDS:
             await update.message.reply_text(
                 ADMIN_WELCOME_TEXT,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
                 reply_markup=get_admin_keyboard()
             )
         else:
@@ -544,6 +573,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in ADMIN_IDS:
             await update.message.reply_text(
                 ADMIN_WELCOME_TEXT,
+                parse_mode="Markdown",
+                disable_web_page_preview=True,
                 reply_markup=get_admin_keyboard()
             )
         else:
