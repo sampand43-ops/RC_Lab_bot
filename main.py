@@ -38,7 +38,8 @@ FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-
 CHANNEL_ID = -1004395670008
 ADMIN_IDS = [7898871921, 1937491557]
 
-BOT_USERNAME = "RCGivvvv_bot"
+# تم تعديل معرف البوت ليطابق المعرف الحقيقي
+BOT_USERNAME = "RCGivvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
 
@@ -194,15 +195,18 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
         if CANCEL_SYNC_REQUESTS.get(chat_id, False):
             conn.commit()
             conn.close()
-            await status_msg.edit_text(
-                f"🛑 *تم إيقاف عملية الأرشفة بنجاح!*\n\n"
-                f"📊 *النتائج حتى لحظة الإيقاف:*\n"
-                f"• الرسائل المفحوصة: {scanned_count:,}\n"
-                f"• الكتب الجديدة المضافة: {added_count:,}\n"
-                f"• المكررة المتجاوزة: {skipped_duplicates:,}",
-                parse_mode="Markdown",
-                reply_markup=get_admin_keyboard()
-            )
+            try:
+                await status_msg.edit_text(
+                    f"🛑 *تم إيقاف عملية الأرشفة بنجاح!*\n\n"
+                    f"📊 *النتائج حتى لحظة الإيقاف:*\n"
+                    f"• الرسائل المفحوصة: {scanned_count:,}\n"
+                    f"• الكتب الجديدة المضافة: {added_count:,}\n"
+                    f"• المكررة المتجاوزة: {skipped_duplicates:,}",
+                    parse_mode="Markdown",
+                    reply_markup=get_admin_keyboard()
+                )
+            except Exception:
+                pass
             return
 
         try:
@@ -403,10 +407,6 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
 
     elif data == "stop_sync":
         CANCEL_SYNC_REQUESTS[chat_id] = True
-        try:
-            await query.message.edit_text("⏳ جاري إيقاف عملية الأرشفة فوراً...")
-        except Exception:
-            pass
 
     elif data == "show_stats":
         asyncio.create_task(show_stats_text(chat_id, context))
@@ -750,18 +750,8 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     for book_name, msg_id in all_records:
         norm_name = normalize_arabic(book_name)
-        if norm_name.startswith(norm_query):
+        if norm_query in norm_name:
             results.append((book_name, msg_id))
-            
-    if not results:
-        forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
-        norm_forbidden = [normalize_arabic(p) for p in forbidden_prefixes]
-        
-        for book_name, msg_id in all_records:
-            norm_name = normalize_arabic(book_name)
-            if norm_query in norm_name:
-                if not any(norm_name.startswith(p) for p in norm_forbidden):
-                    results.append((book_name, msg_id))
     
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
@@ -770,6 +760,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not valid_books:
             valid_books = [sorted_results[0]]
 
+        sent_any = False
         for book_name, msg_id in valid_books:
             try:
                 await context.bot.forward_message(
@@ -777,9 +768,13 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     from_chat_id=CHANNEL_ID,
                     message_id=msg_id
                 )
+                sent_any = True
                 await asyncio.sleep(0.5)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"خطأ أثناء توجيه الرسالة {msg_id}: {e}")
+
+        if not sent_any:
+            await update.message.reply_text("⚠️ تعذر إرسال الملف من القناة، يرجى التأكد من إضافة البوت كـ مشرف (Admin) داخل قناة الكتب وحفظ التغييرات.")
     else:
         if chat_type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
