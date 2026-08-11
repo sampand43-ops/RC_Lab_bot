@@ -29,14 +29,14 @@ BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
 
-# نص التقييد والاعتذار للخاص والمجموعات
+# النصوص المحدثة بحسب طلبك
 RESTRICTED_TEXT = (
     f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
     f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه."
 )
 
 LEAVE_TEXT = (
-    f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن إضافته إلا من قِبل مشرف البوت حصراً.\n\n"
+    f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
     f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه.\n\n"
     f"سأقوم بالمغادرة الآن..."
 )
@@ -358,7 +358,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي يعمل؛ صلاحيات الإضافة محصورة بالأدمن حصراً ومزامنة الخروج مفعلة...")
+    print("بوت البحث الذكي يعمل؛ تم تحديث نص الاعتذار والمغادرة...")
     application.run_polling()
 
 if __name__ == "__main__":
