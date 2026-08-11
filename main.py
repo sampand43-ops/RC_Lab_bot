@@ -42,6 +42,9 @@ BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
 
+# متغير عام للتحكم الفوري بالإيقاف لكل شات
+CANCEL_SYNC_REQUESTS = {}
+
 RESTRICTED_TEXT = (
     f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
     f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه."
@@ -58,7 +61,7 @@ ADMIN_WELCOME_TEXT = (
     "**تعليمات استخدام البوت للمشرفين:**\n"
     "• **عرض الإحصائيات:** لمعرفة إجمالي الكتب ورقم آخر رسالة محفوظة.\n"
     "• **تصدير تقرير (PDF):** لتوليد ملف يحتوي على قائمة جميع الكتب المؤرشفة.\n"
-    "• **الأرشفة:** اختيار إحدى الدفعات لبدء فحص وحفظ الكتب تلقائياً مع إمكانية إلغاء العملية بأي وقت عبر زر الإيقاف.\n"
+    "• **الأرشفة:** اختيار إحدى الدفعات لبدء فحص وحفظ الكتب تلقائياً مع إمكانية إلغاء العملية فوراً عبر زر الإيقاف.\n"
     "• **حذف الأرشيف / عدد محدد:** لإدارة وتطهير السجلات أو مسح أحدث كتب مضافة.\n\n"
     "استخدم الأزرار أدناه للتحكم:"
 )
@@ -171,7 +174,7 @@ def get_confirm_delete_keyboard():
     return InlineKeyboardMarkup(keyboard)
 
 async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: int, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['sync_cancelled'] = False
+    CANCEL_SYNC_REQUESTS[chat_id] = False
     status_msg = await context.bot.send_message(
         chat_id=chat_id,
         text=f"⏳ جاري بدء أرشفة القناة للدفعة ({start_id:,} إلى {end_id:,})...\nيرجى الانتظار.",
@@ -187,11 +190,12 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
 
     msg_id = start_id
     while msg_id <= end_id:
-        if context.user_data.get('sync_cancelled'):
+        # فحص فوري للإيقاف
+        if CANCEL_SYNC_REQUESTS.get(chat_id, False):
             conn.commit()
             conn.close()
             await status_msg.edit_text(
-                f"🛑 *تم إيقاف عملية الأرشفة بناءً على طلبك!*\n\n"
+                f"🛑 *تم إيقاف عملية الأرشفة بنجاح!*\n\n"
                 f"📊 *النتائج حتى لحظة الإيقاف:*\n"
                 f"• الرسائل المفحوصة: {scanned_count:,}\n"
                 f"• الكتب الجديدة المضافة: {added_count:,}\n"
@@ -234,7 +238,7 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
             scanned_count += 1
             msg_id += 1
 
-            if scanned_count % 200 == 0:
+            if scanned_count % 150 == 0:
                 conn.commit()
                 try:
                     await status_msg.edit_text(
@@ -247,11 +251,14 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
                 except Exception:
                     pass
 
-            await asyncio.sleep(0.02)
+            await asyncio.sleep(0.01)
 
         except RetryAfter as e:
-            wait_time = e.retry_after + 2
-            await asyncio.sleep(wait_time)
+            wait_time = e.retry_after + 1
+            for _ in range(int(wait_time)):
+                if CANCEL_SYNC_REQUESTS.get(chat_id, False):
+                    break
+                await asyncio.sleep(1)
             continue
         except Exception:
             scanned_count += 1
@@ -395,8 +402,11 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
         asyncio.create_task(run_sync_process(chat_id, user_id, start_id, end_id, context))
 
     elif data == "stop_sync":
-        context.user_data['sync_cancelled'] = True
-        await query.message.reply_text("⏳ جاري إيقاف عملية الأرشفة...")
+        CANCEL_SYNC_REQUESTS[chat_id] = True
+        try:
+            await query.message.edit_text("⏳ جاري إيقاف عملية الأرشفة فوراً...")
+        except Exception:
+            pass
 
     elif data == "show_stats":
         asyncio.create_task(show_stats_text(chat_id, context))
