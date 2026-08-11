@@ -218,8 +218,7 @@ def extract_part_number(filename):
         val = match.group(2)
         if val in ARABIC_NUM_WORDS:
             return ARABIC_NUM_WORDS[val]
-        val_en = val.translate(str.maketrans('٠١٢٣٤٥```python
-٦٧٨٩', '0123456789'))
+        val_en = val.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val_en.isdigit():
             return int(val_en)
             
@@ -364,7 +363,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("البوت جاهز ويعمل بالنسخة النهائية مع تنسيق النص العريض...")
+    print("البوت جاهز ويعمل بالشكل الصحيح...")
     application.run_polling()
 
 if __name__ == "__main__":
