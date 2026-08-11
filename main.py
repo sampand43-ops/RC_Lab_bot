@@ -41,6 +41,14 @@ LEAVE_TEXT = (
     f"سأقوم بالمغادرة الآن..."
 )
 
+ADMIN_WELCOME_TEXT = (
+    "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
+    "بصفتك المشرف الرئيسي للنظام، تتوفر لك الصلاحيات التالية:\n"
+    "• البحث المباشر: استعراض الأرشيف والبحث عن أي كتاب من هنا بحرية.\n"
+    "• تفعيل المجموعات: عند إضافتك للبوت لأي مجموعة جديدة، سيتم تفعيله فيها تلقائياً.\n\n"
+    "البوت قيد التشغيل وجاهز لخدمتك ✨"
+)
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -68,7 +76,6 @@ def is_group_approved(chat_id: int) -> bool:
     conn.close()
     return bool(row)
 
-# دالة الفحص والمغادرة (معدلة للحماية من أخطاء الصلاحيات)
 async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat = update.effective_chat
     if chat and chat.type in ['group', 'supergroup']:
@@ -92,7 +99,6 @@ async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return False
     return True
 
-# التعامل الصارم مع إضافة البوت لمجموعة جديدة
 async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not chat or chat.type not in ['group', 'supergroup']:
@@ -102,7 +108,6 @@ async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for member in update.message.new_chat_members:
         if member.id == context.bot.id:
-            # التحقق: هل الشخص الذي أضاف البوت هو المشرف المعرف بالـ ID حصراً؟
             if user_id in ADMIN_IDS:
                 conn = sqlite3.connect(DB_PATH)
                 cursor = conn.cursor()
@@ -118,7 +123,6 @@ async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception:
                     pass
             else:
-                # إذا قام أي عضو آخر بإضافته -> حاول إرسال الاعتذار ثم اخرج فوراً بجميع الأحوال
                 try:
                     await context.bot.send_message(
                         chat_id=chat.id,
@@ -154,11 +158,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if chat_type == 'private':
         if user_id in ADMIN_IDS:
-            await update.message.reply_text(
-                "أهلاً بك يا هندسة في لوحة تحكم البوت! 📚🤖\n"
-                "• يمكنك البحث واستعراض الأرشيف هنا بحرية بصفتك المشرف.\n"
-                "• يمكنك إضافة البوت لأي مجموعة جديدة وسيعمل فيها تلقائياً."
-            )
+            await update.message.reply_text(ADMIN_WELCOME_TEXT)
         else:
             await update.message.reply_text(
                 RESTRICTED_TEXT, 
@@ -360,7 +360,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث يعمل بمرونة وصلاحيات معالجة محسّنة للمجموعات العامة والخاصة...")
+    print("البوت جاهز ويعمل بالنسخة النهائية...")
     application.run_polling()
 
 if __name__ == "__main__":
