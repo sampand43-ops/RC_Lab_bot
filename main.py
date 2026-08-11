@@ -2,6 +2,7 @@ import os
 import sqlite3
 import re
 import asyncio
+import urllib.request
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -11,12 +12,25 @@ from telegram.ext import (
     ContextTypes,
 )
 
+# مكتبات إنشاء وتنسيق ملفات PDF باللغة العربية
+from reportlab.lib.pagesizes import A4
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+import arabic_reshaper
+from bidi.algorithm import get_display
+
 # مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
+
+# مسار ورابط تحميل خط الأميري لدعم العربية في PDF
+FONT_PATH = os.path.join(DATA_DIR, "Amiri-Regular.ttf")
+FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf"
 
 # معرف قناتك الثابت
 CHANNEL_ID = -1004395670008
@@ -45,7 +59,7 @@ ADMIN_WELCOME_TEXT = (
     "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
     "بصفتك مشرفاً رئيسياً للنظام، تتوفر لك الصلاحيات الكاملة لجميع الخصائص.\n\n"
     "🔄 *لأرشفة الكتب القديمة:* أرسل الأمر `/sync` أو `/sync 1 2000`\n"
-    "📊 *عرض القائمة والإحصائيات:* أرسل الأمر `/stats`\n"
+    "📄 *استخراج القائمة بصيغة PDF:* أرسل الأمر `/stats`\n"
     "💡 للحصول على دليل التعليمات وتقسيم الصلاحيات، أرسل الأمر: /help\n\n"
     "البوت قيد التشغيل وجاهز لخدمتك ✨"
 )
@@ -53,7 +67,7 @@ ADMIN_WELCOME_TEXT = (
 ADMIN_HELP_TEXT = (
     "📌 *دليل استخدام البوت وتقسيم الصلاحيات*\n\n"
     "━━━━━━ 👑 *صلاحيات المشرف* ━━━━━━\n\n"
-    "• *عرض قائمة الكتب والعدد (`/stats`):* يُرسل لك إحصائية الإرشيف وملف يحتوي على جميع أسماء الكتب المحفوظة.\n\n"
+    "• *تصدير ملف PDF للكتب (`/stats`):* يُرسل لك إحصائية الإرشيف وملف PDF يحتوي على جميع أسماء الكتب.\n\n"
     "• *أرشفة الكتب القديمة (`/sync`):* يفحص القناة ويستخرج جميع الكتب والملفات السابقة.\n\n"
     "• *تفعيل المجموعات:* يمكنك إضافة البوت لأي مجموعة جديدة لتفعيلها تلقائياً واستخدامها من قِبل الأعضاء.\n\n"
     "• *البحث الحر في الخاص:* يمكنك البحث واستخراج أي كتاب مباشرة من محادثة البوت الخاصة دون أي قيود.\n\n"
@@ -83,6 +97,21 @@ def init_db():
     """)
     conn.commit()
     conn.close()
+
+def ensure_font_exists():
+    """تنزيل خط الأميري لدعم العربية في PDF تلقائياً إذا لم يكن موجوداً"""
+    if not os.path.exists(FONT_PATH):
+        try:
+            urllib.request.urlretrieve(FONT_URL, FONT_PATH)
+        except Exception as e:
+            print(f"خطأ في تحميل الخط: {e}")
+
+def reshape_arabic(text):
+    """تهيئة النص العربي للظهور بشكل صحيح في PDF (ربط الحروف والاتجاه)"""
+    if not text:
+        return ""
+    reshaped = arabic_reshaper.reshape(text)
+    return get_display(reshaped)
 
 def is_group_approved(chat_id: int) -> bool:
     conn = sqlite3.connect(DB_PATH)
@@ -195,26 +224,77 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📂 الأرشيف فارغ حالياً. يمكنك استخدام الأمر `/sync` للبدء بالأرشفة.", parse_mode="Markdown")
         return
 
-    # إنشاء ملف نصي يحتوي على جميع أسماء الكتب
-    file_path = os.path.join(DATA_DIR, "archived_books.txt")
-    with open(file_path, "w", encoding="utf-8") as f:
-        f.write(f"📚 قائمة الكتب المؤرشفة بداخل البوت (الإجمالي: {total_count} كتاب)\n")
-        f.write("=" * 50 + "\n\n")
-        for idx, (book_name, msg_id) in enumerate(records, start=1):
-            f.write(f"{idx}. {book_name} (Msg ID: {msg_id})\n")
+    status_msg = await update.message.reply_text("⏳ جاري توليد وتنسيق ملف الـ PDF لقائمة الكتب...")
+
+    ensure_font_exists()
+    
+    pdf_path = os.path.join(DATA_DIR, "archived_books.pdf")
+    
+    # تسجيل خط العربي
+    pdfmetrics.registerFont(TTFont('Amiri', FONT_PATH))
+
+    doc = SimpleDocTemplate(
+        pdf_path,
+        pagesize=A4,
+        rightMargin=30,
+        leftMargin=30,
+        topMargin=30,
+        bottomMargin=30
+    )
+
+    styles = getSampleStyleSheet()
+    
+    arabic_style = ParagraphStyle(
+        'ArabicStyle',
+        parent=styles['Normal'],
+        fontName='Amiri',
+        fontSize=11,
+        leading=16,
+        alignment=2 # محاذاة لليمين
+    )
+
+    title_style = ParagraphStyle(
+        'ArabicTitle',
+        parent=styles['Title'],
+        fontName='Amiri',
+        fontSize=16,
+        leading=22,
+        alignment=1 # محاذاة للوسط
+    )
+
+    story = []
+
+    # العنوان الرئيسي
+    title_text = reshape_arabic(f"📚 قائمة الكتب المؤرشفة - مجتمع القراءة (الإجمالي: {total_count} كتاب)")
+    story.append(Paragraph(title_text, title_style))
+    story.append(Spacer(1, 15))
+
+    # إضافة أسماء الكتب
+    for idx, (book_name, msg_id) in enumerate(records, start=1):
+        line_raw = f"{idx}. {book_name} (معرف الرسالة: {msg_id})"
+        line_reshaped = reshape_arabic(line_raw)
+        story.append(Paragraph(line_reshaped, arabic_style))
+        story.append(Spacer(1, 4))
+
+    doc.build(story)
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
 
     await update.message.reply_text(
         f"📊 *إحصائيات الأرشيف الحالي:*\n\n"
         f"• *عدد الكتب المحفوظة بالكامل:* {total_count} كتاب 📚\n\n"
-        f"📎 تم إرفاق ملف نصي يحتوي على جميع أسماء الكتب المسجلة بداخل قاعدة البيانات.",
+        f"📎 تم إرفاق ملف PDF يحتوي على جميع أسماء الكتب المسجلة.",
         parse_mode="Markdown"
     )
 
-    with open(file_path, "rb") as doc:
+    with open(pdf_path, "rb") as pdf_file:
         await context.bot.send_document(
             chat_id=user_id,
-            document=doc,
-            filename="قائمة_الكتب_المؤرشفة.txt"
+            document=pdf_file,
+            filename="قائمة_الكتب_المؤرشفة.pdf"
         )
 
 async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -511,7 +591,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("البوت جاهز ويعمل مع دعم إحصائيات وتصدير القائمة (/stats)...")
+    print("البوت جاهز ويعمل مع دعم تصدير ملفات PDF للكتب (/stats)...")
     application.run_polling()
 
 if __name__ == "__main__":
