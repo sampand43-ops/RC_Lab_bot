@@ -3,16 +3,21 @@ import sqlite3
 import re
 import asyncio
 import urllib.request
-from telegram import Update
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup
+)
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
+from telegram.error import RetryAfter
 
-# مكتبات إنشاء وتنسيق ملفات PDF باللغة العربية
 from reportlab.lib.pagesizes import A4
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -21,29 +26,22 @@ from reportlab.pdfbase.ttfonts import TTFont
 import arabic_reshaper
 from bidi.algorithm import get_display
 
-# مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
-# مسار ورابط تحميل خط الأميري لدعم العربية في PDF
 FONT_PATH = os.path.join(DATA_DIR, "Amiri-Regular.ttf")
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf"
 
-# معرف قناتك الثابت
 CHANNEL_ID = -1004395670008
-
-# قائمة مشرفي البوت المصرح لهم حصراً
 ADMIN_IDS = [7898871921, 1937491557]
 
-# معرف البوت وبيانات المجموعة الرئيسية
 BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
 
-# النصوص
 RESTRICTED_TEXT = (
     f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
     f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه."
@@ -57,26 +55,7 @@ LEAVE_TEXT = (
 
 ADMIN_WELCOME_TEXT = (
     "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
-    "بصفتك مشرفاً رئيسياً للنظام، تتوفر لك الصلاحيات الكاملة لجميع الخصائص.\n\n"
-    "🔄 *لأرشفة الكتب القديمة:* أرسل الأمر `/sync` أو `/sync 1 2000`\n"
-    "📄 *استخراج القائمة بصيغة PDF:* أرسل الأمر `/stats`\n"
-    "💡 للحصول على دليل التعليمات وتقسيم الصلاحيات، أرسل الأمر: /help\n\n"
-    "البوت قيد التشغيل وجاهز لخدمتك ✨"
-)
-
-ADMIN_HELP_TEXT = (
-    "📌 *دليل استخدام البوت وتقسيم الصلاحيات*\n\n"
-    "━━━━━━ 👑 *صلاحيات المشرف* ━━━━━━\n\n"
-    "• *تصدير ملف PDF للكتب (`/stats`):* يُرسل لك إحصائية الإرشيف وملف PDF يحتوي على جميع أسماء الكتب.\n\n"
-    "• *أرشفة الكتب القديمة (`/sync`):* يفحص القناة ويستخرج جميع الكتب والملفات السابقة.\n\n"
-    "• *تفعيل المجموعات:* يمكنك إضافة البوت لأي مجموعة جديدة لتفعيلها تلقائياً واستخدامها من قِبل الأعضاء.\n\n"
-    "• *البحث الحر في الخاص:* يمكنك البحث واستخراج أي كتاب مباشرة من محادثة البوت الخاصة دون أي قيود.\n\n"
-    "━━━━━━ 👥 *صلاحيات وإرشادات الأعضاء* ━━━━━━\n\n"
-    "• *الاستخدام المقيّد:* يقتصر استخدام الأعضاء للبوت على المجموعات المعتمدة التي قمت بتفعيلها فقط.\n\n"
-    "• *طرق البحث المتاحة:* يمكن للعضو البحث داخل المجموعة عن طريق:\n"
-    "  1️⃣ الإشارة للبوت: `@RCGivvvv_bot اسم الكتاب`\n"
-    "  2️⃣ أو عمل رد (Reply) على أي رسالة للبوت بكتابة اسم الكتاب.\n\n"
-    "• *المنع التلقائي:* لا يمكن للأعضاء استخدام البوت في المحادثات الخاصة أو إضافته لمجموعات خارجية."
+    "يمكنك إدارة الأرشيف، إظهار الإحصائيات، تصدير التقارير، أو حذف الكتب باستخدام الأزرار أدناه."
 )
 
 def init_db():
@@ -86,7 +65,8 @@ def init_db():
         CREATE TABLE IF NOT EXISTS archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             book_name TEXT,
-            msg_id INTEGER UNIQUE
+            msg_id INTEGER UNIQUE,
+            file_unique_id TEXT UNIQUE
         )
     """)
     cursor.execute("""
@@ -95,11 +75,12 @@ def init_db():
             added_by INTEGER
         )
     """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_book_name ON archive(book_name);")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_uid ON archive(file_unique_id);")
     conn.commit()
     conn.close()
 
 def ensure_font_exists():
-    """تنزيل خط الأميري لدعم العربية في PDF تلقائياً إذا لم يكن موجوداً"""
     if not os.path.exists(FONT_PATH):
         try:
             urllib.request.urlretrieve(FONT_URL, FONT_PATH)
@@ -107,7 +88,6 @@ def ensure_font_exists():
             print(f"خطأ في تحميل الخط: {e}")
 
 def reshape_arabic(text):
-    """تهيئة النص العربي للظهور بشكل صحيح في PDF (ربط الحروف والاتجاه)"""
     if not text:
         return ""
     reshaped = arabic_reshaper.reshape(text)
@@ -144,32 +124,47 @@ async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return False
     return True
 
-async def sync_channel_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if update.effective_chat.type != 'private' or user_id not in ADMIN_IDS:
-        return
+def get_admin_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("📊 عرض الإحصائيات السريعة", callback_data="show_stats"),
+            InlineKeyboardButton("📄 تصدير تقرير (PDF)", callback_data="export_pdf")
+        ],
+        [
+            InlineKeyboardButton("🗑 حذف الأرشيف بالكامل", callback_data="confirm_delete_all"),
+            InlineKeyboardButton("✂️ حذف عدد محدد من الكتب", callback_data="ask_delete_count")
+        ],
+        [InlineKeyboardButton("🔄 أرشفة الدفعة 1 (1 - 50,000)", callback_data="sync_1_50000")],
+        [InlineKeyboardButton("🔄 أرشفة الدفعة 2 (50,001 - 100,000)", callback_data="sync_50001_100000")],
+        [InlineKeyboardButton("🔄 أرشفة الدفعة 3 (100,001 - 150,000)", callback_data="sync_100001_150000")],
+        [InlineKeyboardButton("🔄 أرشفة الدفعة 4 (150,001 - 200,000)", callback_data="sync_150001_200000")]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-    start_id = 1
-    end_id = 2000
+def get_confirm_delete_keyboard():
+    keyboard = [
+        [
+            InlineKeyboardButton("⚠️ نعم، احذف الأرشيف بالكامل", callback_data="do_delete_all"),
+            InlineKeyboardButton("❌ إلغاء", callback_data="cancel_delete")
+        ]
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-    if context.args:
-        try:
-            start_id = int(context.args[0])
-            if len(context.args) > 1:
-                end_id = int(context.args[1])
-        except ValueError:
-            await update.message.reply_text("⚠️ يرجى إدخال أرقام صالحة. مثال: `/sync 1 1000`", parse_mode="Markdown")
-            return
-
-    status_msg = await update.message.reply_text(f"⏳ جاري بدء تمشيط وأرشفة القناة من الرسالة رقم {start_id} إلى {end_id}...\nيرجى الانتظار.")
+async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: int, context: ContextTypes.DEFAULT_TYPE):
+    status_msg = await context.bot.send_message(
+        chat_id=chat_id,
+        text=f"⏳ جاري بدء أرشفة القناة للدفعة ({start_id:,} إلى {end_id:,})...\nيرجى الانتظار."
+    )
     
     added_count = 0
+    skipped_duplicates = 0
     scanned_count = 0
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    for msg_id in range(start_id, end_id + 1):
+    msg_id = start_id
+    while msg_id <= end_id:
         try:
             fwd_msg = await context.bot.forward_message(
                 chat_id=user_id,
@@ -180,39 +175,89 @@ async def sync_channel_history(update: Update, context: ContextTypes.DEFAULT_TYP
             document = fwd_msg.document or fwd_msg.video or fwd_msg.audio
             if document:
                 book_name = document.file_name or fwd_msg.caption or "Unknown_Book"
+                file_uid = document.file_unique_id
+
                 cursor.execute(
-                    "INSERT OR IGNORE INTO archive (book_name, msg_id) VALUES (?, ?)",
-                    (book_name, msg_id)
+                    "SELECT 1 FROM archive WHERE file_unique_id = ? OR book_name = ?", 
+                    (file_uid, book_name)
                 )
-                conn.commit()
-                added_count += 1
+                if cursor.fetchone():
+                    skipped_duplicates += 1
+                else:
+                    cursor.execute(
+                        "INSERT OR IGNORE INTO archive (book_name, msg_id, file_unique_id) VALUES (?, ?, ?)",
+                        (book_name, msg_id, file_uid)
+                    )
+                    added_count += 1
             
             try:
                 await fwd_msg.delete()
             except Exception:
                 pass
-                
+
+            scanned_count += 1
+            msg_id += 1
+
+            if scanned_count % 200 == 0:
+                conn.commit()
+                try:
+                    await status_msg.edit_text(
+                        f"⏳ جاري الأرشفة...\n"
+                        f"• تم فحص: {scanned_count:,}\n"
+                        f"• كتب جديدة: {added_count:,}\n"
+                        f"• مكرر ومتجاوز: {skipped_duplicates:,}"
+                    )
+                except Exception:
+                    pass
+
+            await asyncio.sleep(0.02)
+
+        except RetryAfter as e:
+            wait_time = e.retry_after + 2
+            await asyncio.sleep(wait_time)
+            continue
         except Exception:
+            scanned_count += 1
+            msg_id += 1
             pass
 
-        scanned_count += 1
-        
-        if scanned_count % 50 == 0:
-            try:
-                await status_msg.edit_text(f"⏳ جاري الأرشفة... تم فحص {scanned_count} رسالة، وتكشيف {added_count} كتاب حتى الآن.")
-            except Exception:
-                pass
-        
-        await asyncio.sleep(0.05)
-
+    conn.commit()
     conn.close()
-    await status_msg.edit_text(f"✅ *اكتملت عملية الأرشفة بنجاح!*\n\n📊 *التقرير:*\n• الرسائل المفحوصة: {scanned_count}\n• الكتب المضافة للأرشيف: {added_count}", parse_mode="Markdown")
+    
+    await status_msg.edit_text(
+        f"✅ *اكتملت أرشفة الدفعة بنجاح!*\n\n"
+        f"📊 *التقرير النهائي:*\n"
+        f"• الرسائل المفحوصة: {scanned_count:,}\n"
+        f"• الكتب الجديدة المضافة: {added_count:,}\n"
+        f"• المكررة المتجاوزة: {skipped_duplicates:,}",
+        parse_mode="Markdown",
+        reply_markup=get_admin_keyboard()
+    )
 
-async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if update.effective_chat.type != 'private' or user_id not in ADMIN_IDS:
-        return
+async def show_stats_text(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*), MAX(msg_id) FROM archive")
+    row = cursor.fetchone()
+    conn.close()
 
+    total_books = row[0] if row else 0
+    last_msg_id = row[1] if row and row[1] else 0
+
+    text = (
+        f"📊 *إحصائيات الأرشيف الحالي:*\n\n"
+        f"• *إجمالي الكتب المؤرشفة:* {total_books:,} كتاب 📚\n"
+        f"• *رقم آخر رسالة محفوظة:* {last_msg_id:,}"
+    )
+    
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        parse_mode="Markdown",
+        reply_markup=get_admin_keyboard()
+    )
+
+async def generate_pdf_report(chat_id: int, user_id: int, context: ContextTypes.DEFAULT_TYPE):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT book_name, msg_id FROM archive ORDER BY id ASC")
@@ -221,55 +266,34 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     total_count = len(records)
     if total_count == 0:
-        await update.message.reply_text("📂 الأرشيف فارغ حالياً. يمكنك استخدام الأمر `/sync` للبدء بالأرشفة.", parse_mode="Markdown")
+        await context.bot.send_message(
+            chat_id=chat_id,
+            text="📂 الأرشيف فارغ حالياً.",
+            reply_markup=get_admin_keyboard()
+        )
         return
 
-    status_msg = await update.message.reply_text("⏳ جاري توليد وتنسيق ملف الـ PDF لقائمة الكتب...")
+    status_msg = await context.bot.send_message(chat_id=chat_id, text="⏳ جاري توليد ملف الـ PDF...")
 
     ensure_font_exists()
-    
     pdf_path = os.path.join(DATA_DIR, "archived_books.pdf")
-    
-    # تسجيل خط العربي
     pdfmetrics.registerFont(TTFont('Amiri', FONT_PATH))
 
     doc = SimpleDocTemplate(
         pdf_path,
         pagesize=A4,
-        rightMargin=30,
-        leftMargin=30,
-        topMargin=30,
-        bottomMargin=30
+        rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30
     )
 
     styles = getSampleStyleSheet()
-    
-    arabic_style = ParagraphStyle(
-        'ArabicStyle',
-        parent=styles['Normal'],
-        fontName='Amiri',
-        fontSize=11,
-        leading=16,
-        alignment=2 # محاذاة لليمين
-    )
-
-    title_style = ParagraphStyle(
-        'ArabicTitle',
-        parent=styles['Title'],
-        fontName='Amiri',
-        fontSize=16,
-        leading=22,
-        alignment=1 # محاذاة للوسط
-    )
+    arabic_style = ParagraphStyle('ArabicStyle', parent=styles['Normal'], fontName='Amiri', fontSize=11, leading=16, alignment=2)
+    title_style = ParagraphStyle('ArabicTitle', parent=styles['Title'], fontName='Amiri', fontSize=16, leading=22, alignment=1)
 
     story = []
-
-    # العنوان الرئيسي
-    title_text = reshape_arabic(f"📚 قائمة الكتب المؤرشفة - مجتمع القراءة (الإجمالي: {total_count} كتاب)")
+    title_text = reshape_arabic(f"📚 قائمة الكتب المؤرشفة - مجتمع القراءة (الإجمالي: {total_count:,} كتاب)")
     story.append(Paragraph(title_text, title_style))
     story.append(Spacer(1, 15))
 
-    # إضافة أسماء الكتب
     for idx, (book_name, msg_id) in enumerate(records, start=1):
         line_raw = f"{idx}. {book_name} (معرف الرسالة: {msg_id})"
         line_reshaped = reshape_arabic(line_raw)
@@ -283,19 +307,133 @@ async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-    await update.message.reply_text(
-        f"📊 *إحصائيات الأرشيف الحالي:*\n\n"
-        f"• *عدد الكتب المحفوظة بالكامل:* {total_count} كتاب 📚\n\n"
-        f"📎 تم إرفاق ملف PDF يحتوي على جميع أسماء الكتب المسجلة.",
-        parse_mode="Markdown"
-    )
-
     with open(pdf_path, "rb") as pdf_file:
         await context.bot.send_document(
             chat_id=user_id,
             document=pdf_file,
-            filename="قائمة_الكتب_المؤرشفة.pdf"
+            filename="قائمة_الكتب_المؤرشفة.pdf",
+            caption=f"📊 *إحصائيات الأرشيف الحالي:*\n\n• *عدد الكتب المحفوظة:* {total_count:,} كتاب 📚",
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard()
         )
+
+# وظائف حذف الأرشيف
+def delete_all_records():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM archive")
+    cursor.execute("DELETE FROM sqlite_sequence WHERE name='archive'")
+    conn.commit()
+    conn.close()
+
+def delete_last_records(count: int) -> int:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+        DELETE FROM archive 
+        WHERE id IN (
+            SELECT id FROM archive ORDER BY id DESC LIMIT ?
+        )
+    """, (count,))
+    deleted = cursor.rowcount
+    conn.commit()
+    conn.close()
+    return deleted
+
+async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    chat_id = query.message.chat_id
+
+    if user_id not in ADMIN_IDS:
+        return
+
+    data = query.data
+
+    if data.startswith("sync_"):
+        parts = data.split("_")
+        start_id = int(parts[1])
+        end_id = int(parts[2])
+        asyncio.create_task(run_sync_process(chat_id, user_id, start_id, end_id, context))
+
+    elif data == "show_stats":
+        asyncio.create_task(show_stats_text(chat_id, context))
+
+    elif data == "export_pdf":
+        asyncio.create_task(generate_pdf_report(chat_id, user_id, context))
+
+    elif data == "confirm_delete_all":
+        await query.message.reply_text(
+            "⚠️ *تنبيه هام جداً!*\n\nهل أنت تأكد من رغبتك في **حذف الأرشيف بالكامل**؟ لن تتمكن من استعادة البيانات إلا بإعادة الأرشفة.",
+            parse_mode="Markdown",
+            reply_markup=get_confirm_delete_keyboard()
+        )
+
+    elif data == "do_delete_all":
+        delete_all_records()
+        await query.message.reply_text(
+            "🗑 *تم مسح الأرشيف بالكامل بنجاح!*",
+            parse_mode="Markdown",
+            reply_markup=get_admin_keyboard()
+        )
+
+    elif data == "cancel_delete":
+        await query.message.reply_text(
+            "❌ تم إلغاء عملية الحذف.",
+            reply_markup=get_admin_keyboard()
+        )
+
+    elif data == "ask_delete_count":
+        context.user_data['awaiting_delete_count'] = True
+        await query.message.reply_text(
+            "✂️ *حذف عدد محدد من الكتب:*\n\n"
+            "يرجى إرسال **عدد الكتب** التي تريد حذفها من أحدث الكتب المضافة الآن (مثلاً اكتب: `50` أو `100`):",
+            parse_mode="Markdown"
+        )
+
+async def delete_last_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if update.effective_chat.type != 'private' or user_id not in ADMIN_IDS:
+        return
+
+    if not context.args or not context.args[0].isdigit():
+        await update.message.reply_text("⚠️ يرجى تحديد عدد الكتب المراد حذفها. مثال: `/delete_last 50`", parse_mode="Markdown")
+        return
+
+    count = int(context.args[0])
+    deleted = delete_last_records(count)
+    await update.message.reply_text(
+        f"✅ تم حذف أحدث **{deleted:,}** كتاب من الأرشيف بنجاح.",
+        parse_mode="Markdown",
+        reply_markup=get_admin_keyboard()
+    )
+
+async def sync_channel_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if update.effective_chat.type != 'private' or user_id not in ADMIN_IDS:
+        return
+
+    start_id = 1
+    end_id = 200000
+
+    if context.args:
+        try:
+            start_id = int(context.args[0])
+            if len(context.args) > 1:
+                end_id = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text("⚠️ يرجى إدخال أرقام صالحة. مثال: `/sync 1 50000`", parse_mode="Markdown")
+            return
+
+    asyncio.create_task(run_sync_process(update.effective_chat.id, user_id, start_id, end_id, context))
+
+async def stats_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if update.effective_chat.type != 'private' or user_id not in ADMIN_IDS:
+        return
+    asyncio.create_task(show_stats_text(update.effective_chat.id, context))
 
 async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -358,7 +496,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if user_id in ADMIN_IDS:
             await update.message.reply_text(
                 ADMIN_WELCOME_TEXT,
-                parse_mode="Markdown"
+                reply_markup=get_admin_keyboard()
             )
         else:
             await update.message.reply_text(
@@ -392,8 +530,8 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif chat_type == 'private':
         if user_id in ADMIN_IDS:
             await update.message.reply_text(
-                ADMIN_HELP_TEXT,
-                parse_mode="Markdown"
+                ADMIN_WELCOME_TEXT,
+                reply_markup=get_admin_keyboard()
             )
         else:
             await update.message.reply_text(
@@ -410,13 +548,14 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         if document:
             book_name = document.file_name or message.caption or "Unknown_Book"
+            file_uid = document.file_unique_id
             
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             try:
                 cursor.execute(
-                    "INSERT OR IGNORE INTO archive (book_name, msg_id) VALUES (?, ?)",
-                    (book_name, msg_id)
+                    "INSERT OR IGNORE INTO archive (book_name, msg_id, file_unique_id) VALUES (?, ?, ?)",
+                    (book_name, msg_id, file_uid)
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -478,6 +617,22 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if text.startswith('/'):
         return
+
+    # معالجة إدخال عدد الكتب المراد حذفها للمشرف
+    if chat_type == 'private' and user_id in ADMIN_IDS and context.user_data.get('awaiting_delete_count'):
+        if text.isdigit():
+            count = int(text)
+            deleted = delete_last_records(count)
+            context.user_data['awaiting_delete_count'] = False
+            await update.message.reply_text(
+                f"✅ تم حذف أحدث **{deleted:,}** كتاب من الأرشيف بنجاح.",
+                parse_mode="Markdown",
+                reply_markup=get_admin_keyboard()
+            )
+            return
+        else:
+            await update.message.reply_text("⚠️ يرجى إدخال رقم صريح فقط (مثلاً: 50).")
+            return
 
     if chat_type == 'private':
         if user_id not in ADMIN_IDS:
@@ -586,12 +741,14 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("sync", sync_channel_history))
     application.add_handler(CommandHandler("stats", stats_command))
+    application.add_handler(CommandHandler("delete_last", delete_last_command))
+    application.add_handler(CallbackQueryHandler(button_callback_handler))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("البوت جاهز ويعمل مع دعم تصدير ملفات PDF للكتب (/stats)...")
+    print("البوت جاهز ويعمل بالكامل...")
     application.run_polling()
 
 if __name__ == "__main__":
