@@ -21,6 +21,19 @@ DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 # معرف قناتك الثابت
 CHANNEL_ID = -1004395670008
 
+# قائمة مشرفي البوت
+ADMIN_IDS = [7898871921]
+
+# بيانات المجموعة ورابطها المباشر
+GROUP_NAME = "مجتمع القراءة Reading Community"
+GROUP_LINK = "https://t.me/reading_community_group"
+
+# نص التقييد للخاص مع تضمين الرابط داخل الاسم
+RESTRICTED_TEXT = (
+    f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي.\n\n"
+    f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه."
+)
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -35,11 +48,27 @@ def init_db():
     conn.close()
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "أهلاً بك يا هندسة في بوت أرشيف مجتمع القراءة! 📚🤖\n"
-        "• أعمل هنا وفي المجموعات لسحب وإرسال الكتب وأجزائها بالتسلسل.\n"
-        "• للبحث: اكتب اسم الكتاب وسأقوم بإرسال الأجزاء بدقة فائقة!"
-    )
+    user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
+
+    if chat_type == 'private':
+        if user_id in ADMIN_IDS:
+            await update.message.reply_text(
+                "أهلاً بك يا هندسة في لوحة تحكم البوت! 📚🤖\n"
+                "• يمكنك البحث واستعراض الأرشيف هنا بحرية بصفتك المشرف.\n"
+                "• البوت يعمل في المجموعة لخدمة جميع الأعضاء تلقائياً."
+            )
+        else:
+            await update.message.reply_text(
+                RESTRICTED_TEXT, 
+                parse_mode="Markdown", 
+                disable_web_page_preview=True
+            )
+    else:
+        await update.message.reply_text(
+            "أهلاً بكم في مجموعة مجتمع القراءة! 📚\n"
+            "اكتبوا اسم أي كتاب وسأقوم بجلب كافة أجزائه لكم فوراً."
+        )
 
 # دالة السحب التلقائي من القناة
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -96,23 +125,34 @@ def extract_part_number(filename):
             
     return 9999
 
-# دالة لتنظيف النص تماماً من الرموز، الفواصل، النقاط، والتشكيل
 def normalize_arabic(text):
     if not text:
         return ""
-    text = re.sub(r'[\u064b-\u0652]', '', text)  # إزالة التشكيل
+    text = re.sub(r'[\u064b-\u0652]', '', text)
     text = re.sub(r'[إأآٱ]', 'ا', text)
     text = re.sub(r'ى', 'ي', text)
     text = re.sub(r'ؤ', 'و', text)
     text = re.sub(r'ئ', 'ي', text)
-    text = re.sub(r'[^\w\s]', ' ', text)         # تحويل الرموز والفواصل والنقاط إلى مسافات
+    text = re.sub(r'[^\w\s]', ' ', text)
     text = text.replace('_', ' ')
-    text = re.sub(r'\s+', ' ', text)              # دمج المسافات المتعددة
+    text = re.sub(r'\s+', ' ', text)
     return text.strip().lower()
 
-# دالة البحث الذكية
+# دالة البحث المفلترة والمعالجة
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
+        return
+
+    user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
+
+    # منع الأعضاء من استخدام الخاص وإرسال رسالة التنبيه لهم
+    if chat_type == 'private' and user_id not in ADMIN_IDS:
+        await update.message.reply_text(
+            RESTRICTED_TEXT, 
+            parse_mode="Markdown", 
+            disable_web_page_preview=True
+        )
         return
 
     text = update.message.text.strip()
@@ -138,9 +178,9 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     norm_query = normalize_arabic(clean_query)
 
-    # --- حماية ضد الرموز والنقاط (تمنع جلب كافة الكتب) ---
+    # حماية من النقاط والرموز المفردة
     if not norm_query or len(norm_query) < 2:
-        if update.effective_chat.type == 'private':
+        if chat_type == 'private':
             await update.message.reply_text("⚠️ يرجى كتابة اسم كتاب أو كلمة بحث صالحة تحتوي على أحرف.")
         return
 
@@ -157,7 +197,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if norm_name.startswith(norm_query):
             results.append((book_name, msg_id))
             
-    # خطوة احتياطية ثانية في حال عدم وجود تطابق من البداية
     if not results:
         forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
         norm_forbidden = [normalize_arabic(p) for p in forbidden_prefixes]
@@ -186,7 +225,8 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception as e:
                 pass
     else:
-        if update.effective_chat.type == 'private':
+        # إظهار رسالة عدم العثور في الخاص فقط لتجنب إزعاج المجموعة
+        if chat_type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
 
 def main():
@@ -199,9 +239,8 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي والمفلتر يعمل الآن بكفاءة...")
+    print("بوت البحث الذكي يعمل ومقيد بنجاح...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
-
