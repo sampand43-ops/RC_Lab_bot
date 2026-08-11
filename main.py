@@ -46,7 +46,22 @@ ADMIN_WELCOME_TEXT = (
     "بصفتك المشرف الرئيسي للنظام، تتوفر لك الصلاحيات التالية:\n"
     "• *البحث المباشر:* استعراض الأرشيف والبحث عن أي كتاب من هنا بحرية.\n"
     "• *تفعيل المجموعات:* عند إضافتك للبوت لأي مجموعة جديدة، سيتم تفعيله فيها تلقائياً.\n\n"
+    "💡 للحصول على دليل التعليمات والصلاحيات التفصيلي، أرسل الأمر: /help\n\n"
     "البوت قيد التشغيل وجاهز لخدمتك ✨"
+)
+
+ADMIN_HELP_TEXT = (
+    "📌 *دليل استخدام البوت وإدارة الصلاحيات*\n\n"
+    "1️⃣ *استخدام البحث والأرشيف (في المحادثة الخاصة):*\n"
+    "• *البحث المباشر:* اكتب اسم أي كتاب أو كلمة مفتاحية منه مباشرة بداخل هذه المحادثة، وسيقوم البوت بجلب الملف لك من القناة.\n"
+    "• *ترتيب الأجزاء:* يتعامل البوت تلقائياً مع السلاسل والأجزاء (مثل: الجزء الأول، ج2، المجلد الثالث) ويقوم بإرسالها مرتبة.\n"
+    "• *الأرشفة التلقائية:* عند رفع أي كتاب جديد بداخل القناة المربوطة، يتم حفظه وتكشيفه في قاعدة بيانات البوت فوراً دون الحاجة لأي إجراء يدوي.\n\n"
+    "2️⃣ *إدارة المجموعات والصلاحيات:*\n"
+    "• *آلية التفعيل:* يعمل البوت *حصراً* في المجموعات التي تقوم *أنت بنفسك* بإضافته إليها.\n"
+    "• *نظام الحماية والأمان:* في حال تم إضافة البوت إلى أي مجموعة أخرى (عامة أو خاصة) عن طريق أعضاء عاديين، سيقوم البوت بإرسال رسالة اعتذار تلقائية والمغادرة فوراً.\n"
+    "• *كيفية البحث داخل المجموعات المعتمدة:*\n"
+    "  1. الإشارة لليوزر: `@RCGivvvv_bot اسم الكتاب`\n"
+    "  2. أو الرد (Reply) على أي رسالة سابقة للبوت بكتابة اسم الكتاب المطلوب."
 )
 
 def init_db():
@@ -176,6 +191,33 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"2️⃣ أو عمل (رد/Reply) على أي رسالة للبوت وكتابة اسم الكتاب مباشرة.",
             parse_mode="Markdown"
         )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
+
+    if chat_type in ['group', 'supergroup']:
+        if not await is_allowed_group(update, context):
+            return
+        await update.message.reply_text(
+            f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
+            f"للبحث عن أي كتاب، يمكنك:\n"
+            f"1️⃣ إشارة للبوت: `@{BOT_USERNAME} اسم الكتاب`\n"
+            f"2️⃣ أو عمل (رد/Reply) على أي رسالة للبوت وكتابة اسم الكتاب مباشرة.",
+            parse_mode="Markdown"
+        )
+    elif chat_type == 'private':
+        if user_id in ADMIN_IDS:
+            await update.message.reply_text(
+                ADMIN_HELP_TEXT,
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                RESTRICTED_TEXT, 
+                parse_mode="Markdown", 
+                disable_web_page_preview=True
+            )
 
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
@@ -358,14 +400,14 @@ def main():
     application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("البوت جاهز ويعمل بالشكل الصحيح...")
+    print("البوت جاهز مع إضافة أمر المساعدة والتعليمات التفصيلية للمشرف (/help)...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
-
