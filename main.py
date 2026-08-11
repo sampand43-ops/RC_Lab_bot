@@ -24,11 +24,12 @@ CHANNEL_ID = -1004395670008
 # قائمة مشرفي البوت
 ADMIN_IDS = [7898871921]
 
-# بيانات المجموعة ورابطها المباشر
+# معرف البوت وبيانات المجموعة
+BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
 
-# نص التقييد للخاص مع تضمين الرابط داخل الاسم
+# نص التقييد للخاص
 RESTRICTED_TEXT = (
     f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي.\n\n"
     f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه."
@@ -66,8 +67,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
     else:
         await update.message.reply_text(
-            "أهلاً بكم في مجموعة مجتمع القراءة! 📚\n"
-            "اكتبوا اسم أي كتاب وسأقوم بجلب كافة أجزائه لكم فوراً."
+            f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
+            f"للبحث عن أي كتاب، يمكنك:\n"
+            f"1️⃣ إشارة للبوت: `@{BOT_USERNAME} اسم الكتاب`\n"
+            f"2️⃣ أو عمل (رد/Reply) على أي رسالة للبوت وكتابة اسم الكتاب مباشرة.",
+            parse_mode="Markdown"
         )
 
 # دالة السحب التلقائي من القناة
@@ -145,27 +149,49 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
-
-    # منع الأعضاء من استخدام الخاص وإرسال رسالة التنبيه لهم
-    if chat_type == 'private' and user_id not in ADMIN_IDS:
-        await update.message.reply_text(
-            RESTRICTED_TEXT, 
-            parse_mode="Markdown", 
-            disable_web_page_preview=True
-        )
-        return
-
     text = update.message.text.strip()
+
     if text.startswith('/'):
         return
 
-    clean_query = text
+    # 1. المعالجة في المحادثة الخاصة
+    if chat_type == 'private':
+        if user_id not in ADMIN_IDS:
+            await update.message.reply_text(
+                RESTRICTED_TEXT, 
+                parse_mode="Markdown", 
+                disable_web_page_preview=True
+            )
+            return
+        clean_query = text
+
+    # 2. المعالجة داخل المجموعات (شاملة الرد والإشارة)
+    elif chat_type in ['group', 'supergroup']:
+        is_reply_to_bot = (
+            update.message.reply_to_message 
+            and update.message.reply_to_message.from_user 
+            and update.message.reply_to_message.from_user.id == context.bot.id
+        )
+        
+        mention_pattern = rf'@{re.escape(BOT_USERNAME)}'
+        has_mention = bool(re.search(mention_pattern, text, re.IGNORECASE))
+
+        # إذا لم يكن رداً على البوت ولم يحتوي على إشارة البوت -> تجاهل الرسالة تماماً
+        if not (is_reply_to_bot or has_mention):
+            return
+
+        # تنظيف النص واستخراج اسم الكتاب
+        clean_query = re.sub(mention_pattern, '', text, flags=re.IGNORECASE).strip()
+
+    else:
+        return
+
+    # إزالة الكلمات الزائدة إن وجدت
     phrases_to_remove = [
         "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
         "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب", 
         "اريد", "أريد", "كتاب", "رواية"
     ]
-    
     phrases_to_remove = sorted(phrases_to_remove, key=len, reverse=True)
     
     for phrase in phrases_to_remove:
@@ -225,7 +251,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except Exception as e:
                 pass
     else:
-        # إظهار رسالة عدم العثور في الخاص فقط لتجنب إزعاج المجموعة
+        # إظهار رسالة عدم العثور فقط في الخاص لتفادي إزعاج المجموعة
         if chat_type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
 
@@ -239,7 +265,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("بوت البحث الذكي يعمل ومقيد بنجاح...")
+    print("بوت البحث الذكي يعمل بالرد والإشارة بنجاح...")
     application.run_polling()
 
 if __name__ == "__main__":
