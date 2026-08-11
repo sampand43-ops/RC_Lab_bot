@@ -21,7 +21,7 @@ DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 # معرف قناتك الثابت
 CHANNEL_ID = -1004395670008
 
-# قائمة مشرفي البوت المصرح لهم حصراً بإضافته للمجموعات
+# قائمة مشرفي البوت المصرح لهم حصراً
 ADMIN_IDS = [7898871921, 1937491557]
 
 # معرف البوت وبيانات المجموعة الرئيسية
@@ -44,6 +44,7 @@ LEAVE_TEXT = (
 ADMIN_WELCOME_TEXT = (
     "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
     "بصفتك مشرفاً رئيسياً للنظام، تتوفر لك الصلاحيات الكاملة لجميع الخصائص.\n\n"
+    "🔄 *لأرشفة الكتب القديمة قبل انضمام البوت:* أرسل الأمر `/sync` أو `/sync 1 2000`\n"
     "💡 للحصول على دليل التعليمات وتقسيم الصلاحيات التفصيلي، أرسل الأمر: /help\n\n"
     "البوت قيد التشغيل وجاهز لخدمتك ✨"
 )
@@ -51,9 +52,10 @@ ADMIN_WELCOME_TEXT = (
 ADMIN_HELP_TEXT = (
     "📌 *دليل استخدام البوت وتقسيم الصلاحيات*\n\n"
     "━━━━━━ 👑 *صلاحيات المشرف* ━━━━━━\n\n"
+    "• *أرشفة الكتب القديمة (`/sync`):* يمكنك كتابة `/sync` لفحص القناة واستخراج جميع الكتب والملفات التي تم رفعها قبل انضمام البوت.\n\n"
     "• *تفعيل المجموعات:* يمكنك إضافة البوت لأي مجموعة جديدة لتفعيلها تلقائياً واستخدامها من قِبل الأعضاء.\n\n"
     "• *البحث الحر في الخاص:* يمكنك البحث واستخراج أي كتاب مباشرة من محادثة البوت الخاصة دون أي قيود.\n\n"
-    "• *الأرشفة الآلية:* بمجرد رفع أي ملف في القناة المربوطة، يتم حفظه وتكشيفه بداخل قاعدة البيانات فوراً.\n\n"
+    "• *الأرشفة الآلية:* بمجرد رفع أي ملف جديد في القناة المربوطة، يتم حفظه وتكشيفه بداخل قاعدة البيانات فوراً.\n\n"
     "━━━━━━ 👥 *صلاحيات وإرشادات الأعضاء* ━━━━━━\n\n"
     "• *الاستخدام المقيّد:* يقتصر استخدام الأعضاء للبوت على المجموعات المعتمدة التي قمت بتفعيلها فقط.\n\n"
     "• *طرق البحث المتاحة:* يمكن للعضو البحث داخل المجموعة عن طريق:\n"
@@ -111,6 +113,70 @@ async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                     pass
             return False
     return True
+
+async def sync_channel_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if update.effective_chat.type != 'private' or user_id not in ADMIN_IDS:
+        return
+
+    start_id = 1
+    end_id = 2000
+
+    if context.args:
+        try:
+            start_id = int(context.args[0])
+            if len(context.args) > 1:
+                end_id = int(context.args[1])
+        except ValueError:
+            await update.message.reply_text("⚠️ يرجى إدخال أرقام صالحة. مثال: `/sync 1 1000`", parse_mode="Markdown")
+            return
+
+    status_msg = await update.message.reply_text(f"⏳ جاري بدء تمشيط وأرشفة القناة من الرسالة رقم {start_id} إلى {end_id}...\nيرجى الانتظار.")
+    
+    added_count = 0
+    scanned_count = 0
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    for msg_id in range(start_id, end_id + 1):
+        try:
+            fwd_msg = await context.bot.forward_message(
+                chat_id=user_id,
+                from_chat_id=CHANNEL_ID,
+                message_id=msg_id
+            )
+            
+            document = fwd_msg.document or fwd_msg.video or fwd_msg.audio
+            if document:
+                book_name = document.file_name or fwd_msg.caption or "Unknown_Book"
+                cursor.execute(
+                    "INSERT OR IGNORE INTO archive (book_name, msg_id) VALUES (?, ?)",
+                    (book_name, msg_id)
+                )
+                conn.commit()
+                added_count += 1
+            
+            try:
+                await fwd_msg.delete()
+            except Exception:
+                pass
+                
+        except Exception:
+            pass
+
+        scanned_count += 1
+        
+        if scanned_count % 50 == 0:
+            try:
+                await status_msg.edit_text(f"⏳ جاري الأرشفة... تم فحص {scanned_count} رسالة، وتكشيف {added_count} كتاب حتى الآن.")
+            except Exception:
+                pass
+        
+        await asyncio.sleep(0.05)
+
+    conn.close()
+    await status_msg.edit_text(f"✅ *اكتملت عملية الأرشفة بنجاح!*\n\n📊 *التقرير:*\n• الرسائل المفحوصة: {scanned_count}\n• الكتب المضافة للأرشيف: {added_count}", parse_mode="Markdown")
 
 async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
@@ -230,7 +296,7 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
             cursor = conn.cursor()
             try:
                 cursor.execute(
-                    "INSERT INTO archive (book_name, msg_id) VALUES (?, ?)",
+                    "INSERT OR IGNORE INTO archive (book_name, msg_id) VALUES (?, ?)",
                     (book_name, msg_id)
                 )
                 conn.commit()
@@ -399,12 +465,13 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("sync", sync_channel_history))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("البوت جاهز ويعمل مع المشرفين المعتمدين...")
+    print("البوت جاهز ويعمل مع دعم الأرشفة السابقة (/sync)...")
     application.run_polling()
 
 if __name__ == "__main__":
