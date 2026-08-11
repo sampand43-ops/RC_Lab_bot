@@ -44,8 +44,8 @@ LEAVE_TEXT = (
 ADMIN_WELCOME_TEXT = (
     "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
     "بصفتك المشرف الرئيسي للنظام، تتوفر لك الصلاحيات التالية:\n"
-    "• البحث المباشر: استعراض الأرشيف والبحث عن أي كتاب من هنا بحرية.\n"
-    "• تفعيل المجموعات: عند إضافتك للبوت لأي مجموعة جديدة، سيتم تفعيله فيها تلقائياً.\n\n"
+    "• *البحث المباشر:* استعراض الأرشيف والبحث عن أي كتاب من هنا بحرية.\n"
+    "• *تفعيل المجموعات:* عند إضافتك للبوت لأي مجموعة جديدة، سيتم تفعيله فيها تلقائياً.\n\n"
     "البوت قيد التشغيل وجاهز لخدمتك ✨"
 )
 
@@ -158,7 +158,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if chat_type == 'private':
         if user_id in ADMIN_IDS:
-            await update.message.reply_text(ADMIN_WELCOME_TEXT)
+            await update.message.reply_text(
+                ADMIN_WELCOME_TEXT,
+                parse_mode="Markdown"
+            )
         else:
             await update.message.reply_text(
                 RESTRICTED_TEXT, 
@@ -215,7 +218,8 @@ def extract_part_number(filename):
         val = match.group(2)
         if val in ARABIC_NUM_WORDS:
             return ARABIC_NUM_WORDS[val]
-        val_en = val.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
+        val_en = val.translate(str.maketrans('٠١٢٣٤٥```python
+٦٧٨٩', '0123456789'))
         if val_en.isdigit():
             return int(val_en)
             
@@ -360,7 +364,7 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("البوت جاهز ويعمل بالنسخة النهائية...")
+    print("البوت جاهز ويعمل بالنسخة النهائية مع تنسيق النص العريض...")
     application.run_polling()
 
 if __name__ == "__main__":
