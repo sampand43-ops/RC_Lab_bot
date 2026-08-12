@@ -24,8 +24,9 @@ API_ID = 34123643
 API_HASH = "12dccc6e1dce1c82853587ba04e9694d"
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 
-# معرف قناتك
+# معرف وقناة التليجرام
 CHANNEL_ID = -1004395670008
+CHANNEL_USERNAME = "@ReadingCommunity_Library"
 ADMIN_IDS = [7898871921, 1937491557]
 
 BOT_USERNAME = "RCGivvvv_bot"
@@ -183,10 +184,9 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             
-            # حل مشكلة الـ Peer عن طريق جلب معلومات القناة أولاً داخل الجلسة
+            # استخدام الـ Username لتفادي مشكلة الـ Peer ID Invalid نهائياً
             async with Client("archive_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=TOKEN) as app:
-                chat = await app.get_chat(CHANNEL_ID)
-                async for message in app.get_chat_history(chat.id):
+                async for message in app.get_chat_history(CHANNEL_USERNAME):
                     document = message.document or message.video or message.audio
                     if document:
                         book_name = document.file_name or message.caption or f"Book_{message.id}"
@@ -364,4 +364,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
