@@ -58,21 +58,22 @@ LEAVE_TEXT = (
     f"سأقوم بالمغادرة الآن..."
 )
 
+# تعليمات الإدارة المحدثة
 ADMIN_WELCOME_TEXT = (
     f"أهلاً بك في لوحة تحكم بوت أرشيف [{GROUP_NAME}]({GROUP_LINK}) 📚⚙️\n\n"
-    "**تعليمات استخدام البوت للمشرفين:**\n"
-    "• **عرض الإحصائيات:** لمعرفة إجمالي الكتب ورقم آخر رسالة محفوظة.\n"
-    "• **تصدير تقرير (PDF):** لتوليد ملف يحتوي على قائمة جميع الكتب المؤرشفة.\n"
-    "• **الأرشفة:** اختيار إحدى الدفعات لبدء فحص وحفظ فهرس الكتب تلقائياً مع إمكانية إلغاء العملية فوراً.\n"
-    "• **حذف الأرشيف / عدد محدد:** لإدارة وتطهير السجلات أو مسح أحدث كتب مضافة.\n\n"
-    "استخدم الأزرار أدناه للتحكم:"
+    "📌 **التعليمات والشروط الكلية لعمل البوت:**\n"
+    "1️⃣ **رفع البوت مشرفاً (Admin):** يجب إضافة البوت مشرفاً في القناة المصدر حتى يتمكن من مسح الكتب وتحويلها مباشرة للمستخدمين.\n"
+    "2️⃣ **آلية عمل الفهرسة:** البوت يقوم بمسح القناة وحفظ **(أسماء الكتب + أرقام الرسائل)** فقط في قاعدة بيانات خفيفة دون خزن أي ملفات على السيرفر.\n"
+    "3️⃣ **الأرشفة والمسح:** اختر إحدى الدفعات لبدء الفهرسة، ويمكنك إيقاف العملية في أي وقت بنقرة زر.\n"
+    "4️⃣ **التحويل المباشر:** عند طلب الأعضاء لأي كتاب، يقوم البوت بالبحث في الفهرس وتحويل الرسالة الأصلية من القناة فوراً.\n\n"
+    "استخدم الأزرار أدناه للتحكم والأرشفة:"
 )
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
-    # القاعدة تخزن فقط اسم الكتاب ورقم الرسالة في القناة
+    # القاعدة تخزن فقط اسم الكتاب ورقم الرسالة
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -169,7 +170,7 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
     CANCEL_SYNC_REQUESTS[chat_id] = False
     status_msg = await context.bot.send_message(
         chat_id=chat_id,
-        text=f"⏳ جاري مسح القناة وفهرسة الكتب للدفعة ({start_id:,} إلى {end_id:,})...\nيرجى الانتظار.",
+        text=f"⏳ جاري مسح رسائل القناة وفهرسة أسماء الكتب للدفعة ({start_id:,} إلى {end_id:,})...\nيرجى الانتظار.",
         reply_markup=get_cancel_sync_keyboard()
     )
     
@@ -190,7 +191,7 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
                     f"🛑 *تم إيقاف عملية الفهرسة بنجاح!*\n\n"
                     f"📊 *النتائج حتى لحظة الإيقاف:*\n"
                     f"• الرسائل المفحوصة: {scanned_count:,}\n"
-                    f"• الكتب المفهرسة الجديدة: {added_count:,}\n"
+                    f"• أسماء الكتب المفهرسة: {added_count:,}\n"
                     f"• المكررة المتجاوزة: {skipped_duplicates:,}",
                     parse_mode="Markdown",
                     reply_markup=get_admin_keyboard()
@@ -241,9 +242,9 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
                 conn.commit()
                 try:
                     await status_msg.edit_text(
-                        f"⏳ جاري المسح والفهرسة...\n"
+                        f"⏳ جاري الفهرسة والتسجيل...\n"
                         f"• تم فحص: {scanned_count:,}\n"
-                        f"• كتب جديدة: {added_count:,}\n"
+                        f"• أسماء كتب جديدة: {added_count:,}\n"
                         f"• مكرر ومتجاوز: {skipped_duplicates:,}",
                         reply_markup=get_cancel_sync_keyboard()
                     )
@@ -268,10 +269,10 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
     conn.close()
     
     await status_msg.edit_text(
-        f"✅ *اكتملت فهرسة الدفعة بنجاح!*\n\n"
+        f"✅ *اكتملت فهرسة الكتب بنجاح!*\n\n"
         f"📊 *التقرير النهائي:*\n"
         f"• الرسائل المفحوصة: {scanned_count:,}\n"
-        f"• الكتب المفهرسة الجديدة: {added_count:,}\n"
+        f"• أسماء الكتب المضافة: {added_count:,}\n"
         f"• المكررة المتجاوزة: {skipped_duplicates:,}",
         parse_mode="Markdown",
         reply_markup=get_admin_keyboard()
@@ -419,7 +420,7 @@ async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_
     elif data == "do_delete_all":
         delete_all_records()
         await query.message.reply_text(
-            "🗑 *تم مسح الأرشيف بالكامل بنجاح!*",
+            "🗑 *تم مسح الفهرس بالكامل بنجاح!*",
             parse_mode="Markdown",
             reply_markup=get_admin_keyboard()
         )
@@ -450,7 +451,7 @@ async def delete_last_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     count = int(context.args[0])
     deleted = delete_last_records(count)
     await update.message.reply_text(
-        f"✅ تم حذف أحدث **{deleted:,}** كتاب من الأرشيف بنجاح.",
+        f"✅ تم حذف أحدث **{deleted:,}** كتاب من الفهرس بنجاح.",
         parse_mode="Markdown",
         reply_markup=get_admin_keyboard()
     )
@@ -672,7 +673,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             deleted = delete_last_records(count)
             context.user_data['awaiting_delete_count'] = False
             await update.message.reply_text(
-                f"✅ تم حذف أحدث **{deleted:,}** كتاب من الأرشيف بنجاح.",
+                f"✅ تم حذف أحدث **{deleted:,}** كتاب من الفهرس بنجاح.",
                 parse_mode="Markdown",
                 reply_markup=get_admin_keyboard()
             )
@@ -782,7 +783,10 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 await asyncio.sleep(0.5)
 
         if not sent_any and chat_type == 'private':
-            await update.message.reply_text(f"❌ عذراً، تعذر تحويل الملف من القناة حالياً.")
+            await update.message.reply_text(
+                "❌ عذراً، تعذر تحويل الملف من القناة حالياً.\n"
+                "📌 يرجى التأكد من رفع البوت مشرفاً (Admin) داخل القناة ليتمكن من تحويل الرسائل."
+            )
     else:
         if chat_type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في القناة.")
