@@ -2,12 +2,11 @@ import os
 import sqlite3
 import re
 import asyncio
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
-    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -20,18 +19,23 @@ if not os.path.exists(DATA_DIR):
 
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
+# بيانات Pyrogram للأرشفة التاريخية (لجلب الملفات القديمة)
 API_ID = 34123643
 API_HASH = "12dccc6e1dce1c82853587ba04e9694d"
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 
+# معرف قناتك الثابت
 CHANNEL_ID = -1004395670008
-CHANNEL_USERNAME = "@ReadingCommunity_Library"
+
+# قائمة مشرفي البوت المصرح لهم حصراً بإضافته للمجموعات
 ADMIN_IDS = [7898871921, 1937491557]
 
+# معرف البوت وبيانات المجموعة الرئيسية
 BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
 
+# النصوص
 RESTRICTED_TEXT = (
     f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
     f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه."
@@ -41,6 +45,28 @@ LEAVE_TEXT = (
     f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
     f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه.\n\n"
     f"سأقوم بالمغادرة الآن..."
+)
+
+ADMIN_WELCOME_TEXT = (
+    "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
+    "بصفتك مشرفاً رئيسياً للنظام، تتوفر لك الصلاحيات الكاملة لجميع الخصائص.\n\n"
+    "💡 للحصول على دليل التعليمات وتقسيم الصلاحيات التفصيلي، أرسل الأمر: /help\n\n"
+    "البوت قيد التشغيل وجاهز لخدمتك ✨"
+)
+
+ADMIN_HELP_TEXT = (
+    "📌 *دليل استخدام البوت وتقسيم الصلاحيات*\n\n"
+    "━━━━━━ 👑 *صلاحيات المشرف* ━━━━━━\n\n"
+    "• *تفعيل المجموعات:* يمكنك إضافة البوت لأي مجموعة جديدة لتفعيلها تلقائياً واستخدامها من قِبل الأعضاء.\n\n"
+    "• *الأرشفة الشاملة (الجديدة):* أرسل الأمر `/sync` في الخاصة لجلب وأرشفة **جميع الملفات السابقة** الموجودة في القناة دفعة واحدة.\n\n"
+    "• *البحث الحر في الخاص:* يمكنك البحث واستخراج أي كتاب مباشرة من محادثة البوت الخاصة دون أي قيود.\n\n"
+    "• *الأرشفة الآلية:* بمجرد رفع أي ملف جديد في القناة المربوطة، يتم حفظه وتكشيفه بداخل قاعدة البيانات فوراً.\n\n"
+    "━━━━━━ 👥 *صلاحيات وإرشادات الأعضاء* ━━━━━━\n\n"
+    "• *الاستخدام المقيّد:* يقتصر استخدام الأعضاء للبوت على المجموعات المعتمدة التي قمت بتفعيلها فقط.\n\n"
+    "• *طرق البحث المتاحة:* يمكن للعضو البحث داخل المجموعة عن طريق:\n"
+    "  1️⃣ الإشارة للبوت: `@RCGivvvv_bot اسم الكتاب`\n"
+    "  2️⃣ أو عمل رد (Reply) على أي رسالة للبوت بكتابة اسم الكتاب.\n\n"
+    "• *المنع التلقائي:* لا يمكن للأعضاء استخدام البوت في المحادثات الخاصة أو إضافته لمجموعات خارجية، وسيقوم البوت باعتذار ومغادرة تلقائية."
 )
 
 def init_db():
@@ -77,7 +103,12 @@ async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return True
         else:
             try:
-                await context.bot.send_message(chat_id=chat.id, text=LEAVE_TEXT, parse_mode="Markdown", disable_web_page_preview=True)
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text=LEAVE_TEXT,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True
+                )
             except Exception:
                 pass
             finally:
@@ -92,7 +123,9 @@ async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not chat or chat.type not in ['group', 'supergroup']:
         return
+
     user_id = update.message.from_user.id if update.message and update.message.from_user else None
+
     for member in update.message.new_chat_members:
         if member.id == context.bot.id:
             if user_id in ADMIN_IDS:
@@ -101,44 +134,95 @@ async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cursor.execute("INSERT OR REPLACE INTO allowed_groups (chat_id, added_by) VALUES (?, ?)", (chat.id, user_id))
                 conn.commit()
                 conn.close()
-                await context.bot.send_message(chat_id=chat.id, text="أهلاً بكم! 📚🤖\nتم تفعيل البوت بنجاح لهذه المجموعة بواسطة المشرف.")
+                
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        text="أهلاً بكم! 📚🤖\nتم تفعيل البوت بنجاح لهذه المجموعة بواسطة المشرف."
+                    )
+                except Exception:
+                    pass
             else:
-                await context.bot.send_message(chat_id=chat.id, text=LEAVE_TEXT, parse_mode="Markdown", disable_web_page_preview=True)
-                await context.bot.leave_chat(chat.id)
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        text=LEAVE_TEXT,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True
+                    )
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        await context.bot.leave_chat(chat.id)
+                    except Exception:
+                        pass
 
 async def on_bot_left_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.left_chat_member:
         if update.message.left_chat_member.id == context.bot.id:
+            chat_id = update.effective_chat.id
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM allowed_groups WHERE chat_id = ?", (update.effective_chat.id,))
+            cursor.execute("DELETE FROM allowed_groups WHERE chat_id = ?", (chat_id,))
             conn.commit()
             conn.close()
 
-# --- لوحة التحكم والأزرار للمشرف ---
+# --- دالة مسح وأرشفة الملفات السابقة في القناة ---
+async def sync_channel_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        return
+
+    status_msg = await update.message.reply_text("🚀 جاري بدء سحب وأرشفة جميع الملفات السابقة من القناة... يرجى الانتظار.")
+    
+    try:
+        count = 0
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # استخدام Pyrogram لجلب سجل القناة بالكامل بالطريقة المدعومة للبوتات المشرفة
+        async with Client("archive_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=TOKEN) as app:
+            async for message in app.get_chat_history(CHANNEL_ID):
+                document = message.document or message.video or message.audio
+                if document:
+                    book_name = document.file_name or message.caption or f"Book_{message.id}"
+                    msg_id = message.id
+                    try:
+                        cursor.execute(
+                            "INSERT INTO archive (book_name, msg_id) VALUES (?, ?)",
+                            (book_name, msg_id)
+                        )
+                        count += 1
+                    except sqlite3.IntegrityError:
+                        pass
+                        
+        conn.commit()
+        conn.close()
+        await status_msg.edit_text(f"✅ تمت أرشفة الملفات السابقة بنجاح!\nتم إضافة `{count}` ملفاً جديداً إلى قاعدة البيانات.")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ حدث خطأ أثناء الأرشفة السابقة:\n`{e}`", parse_mode="Markdown")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
 
-    if chat_type in ['group', 'supergroup'] and not await is_allowed_group(update, context):
-        return
+    if chat_type in ['group', 'supergroup']:
+        if not await is_allowed_group(update, context):
+            return
 
     if chat_type == 'private':
         if user_id in ADMIN_IDS:
-            keyboard = [
-                [InlineKeyboardButton("⚡ جلب الكتب القديمة والجديدة (سحب الأسمى)", callback_data="sync_channel")],
-                [InlineKeyboardButton("📊 عرض الإحصائيات السريعة", callback_data="stats")],
-                [InlineKeyboardButton("🗑️ حذف الأرشيف بالكامل", callback_data="clear_archive")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
             await update.message.reply_text(
-                "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
-                "• يتم تخزين أسماء الكتب ومعرفاتها فقط لعدم استهلاك مساحة السيرفر.\n"
-                "• اختر إحدى العمليات أدناه من الأزرار:",
-                reply_markup=reply_markup
+                ADMIN_WELCOME_TEXT,
+                parse_mode="Markdown"
             )
         else:
-            await update.message.reply_text(RESTRICTED_TEXT, parse_mode="Markdown", disable_web_page_preview=True)
+            await update.message.reply_text(
+                RESTRICTED_TEXT, 
+                parse_mode="Markdown", 
+                disable_web_page_preview=True
+            )
     else:
         await update.message.reply_text(
             f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
@@ -148,86 +232,49 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-# --- معالجة الضغط على الأزرار ---
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
 
-    if user_id not in ADMIN_IDS:
-        await query.edit_message_text("❌ عذراً، هذا الأمر مخصص للمشرفين فقط.")
-        return
+    if chat_type in ['group', 'supergroup']:
+        if not await is_allowed_group(update, context):
+            return
+        await update.message.reply_text(
+            f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
+            f"للبحث عن أي كتاب، يمكنك:\n"
+            f"1️⃣ إشارة للبوت: `@{BOT_USERNAME} اسم الكتاب`\n"
+            f"2️⃣ أو عمل (رد/Reply) على أي رسالة للبوت وكتابة اسم الكتاب مباشرة.",
+            parse_mode="Markdown"
+        )
+    elif chat_type == 'private':
+        if user_id in ADMIN_IDS:
+            await update.message.reply_text(
+                ADMIN_HELP_TEXT,
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                RESTRICTED_TEXT, 
+                parse_mode="Markdown", 
+                disable_web_page_preview=True
+            )
 
-    data = query.data
-
-    if data == "stats":
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(DISTINCT msg_id) FROM archive")
-        count = cursor.fetchone()[0]
-        conn.close()
-        await query.message.reply_text(f"📊 إحصائيات الأرشيف الحالية:\nعدد الكتب المسجلة: `{count}` كتاباً.", parse_mode="Markdown")
-
-    elif data == "clear_archive":
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM archive")
-        conn.commit()
-        conn.close()
-        await query.message.reply_text("🗑️ تم تفريغ الأرشيف بالكامل بنجاح.")
-
-    elif data == "sync_channel":
-        status_msg = await query.message.reply_text("🚀 جاري فحص وسحب أسماء الكتب القديمة والجديدة من القناة...")
-        try:
-            count = 0
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            
-            # الطريقة البديلة المعتمدة: فحص معرفات الرسائل تصاعدياً/تنازلياً لتجاوز حظر get_chat_history
-            async with Client("archive_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=TOKEN) as app:
-                # جلب أحدث رسالة لمعرفة نقطة البداية
-                async for message in app.get_chat_history(CHANNEL_USERNAME, limit=1):
-                    latest_id = message.id
-                    
-                    # فحص الرسائل دفعة واحدة باستخدام get_messages لتجنب خطأ BOT_METHOD_INVALID
-                    batch_size = 100
-                    for start_id in range(latest_id, 0, -batch_size):
-                        end_id = max(1, start_id - batch_size)
-                        message_ids = list(range(start_id, end_id, -1))
-                        
-                        try:
-                            messages = await app.get_messages(CHANNEL_USERNAME, message_ids)
-                            for msg in messages:
-                                if msg and (msg.document or msg.video or msg.audio):
-                                    doc = msg.document or msg.video or msg.audio
-                                    book_name = doc.file_name or msg.caption or f"Book_{msg.id}"
-                                    try:
-                                        cursor.execute("INSERT INTO archive (book_name, msg_id) VALUES (?, ?)", (book_name, msg.id))
-                                        count += 1
-                                    except sqlite3.IntegrityError:
-                                        pass
-                        except Exception:
-                            continue
-                        
-                        await asyncio.sleep(0.3) # فاصل زمني بسيط لتجنب حدود السيرفر
-
-            conn.commit()
-            conn.close()
-            await status_msg.edit_text(f"✅ تمت أرشفة جميع الكتب القديمة والجديدة بنجاح!\nتم حفظ `{count}` اسم كتاب في قاعدة البيانات دون أي استهلاك لمساحة السيرفر.", parse_mode="Markdown")
-        except Exception as e:
-            await status_msg.edit_text(f"❌ حدث خطأ أثناء الأرشفة:\n`{e}`", parse_mode="Markdown")
-
-# --- تخزين اسم الملف للرسائل الجديدة فور نشرها في القناة ---
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
     if message:
+        msg_id = message.message_id
         document = message.document or message.video or message.audio
+        
         if document:
             book_name = document.file_name or message.caption or "Unknown_Book"
+            
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             try:
-                cursor.execute("INSERT INTO archive (book_name, msg_id) VALUES (?, ?)", (book_name, message.message_id))
+                cursor.execute(
+                    "INSERT INTO archive (book_name, msg_id) VALUES (?, ?)",
+                    (book_name, msg_id)
+                )
                 conn.commit()
             except sqlite3.IntegrityError:
                 pass
@@ -256,11 +303,13 @@ def extract_part_number(filename):
         val_en = val.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val_en.isdigit():
             return int(val_en)
+            
     num_match = re.search(r'[\s\-_]([0-9٠-٩]+|\d+)\s*(?:\.pdf|\.epub|\.zip)?$', filename)
     if num_match:
         val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val.isdigit():
             return int(val)
+            
     return 9999
 
 def normalize_arabic(text):
@@ -289,9 +338,14 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if chat_type == 'private':
         if user_id not in ADMIN_IDS:
-            await update.message.reply_text(RESTRICTED_TEXT, parse_mode="Markdown", disable_web_page_preview=True)
+            await update.message.reply_text(
+                RESTRICTED_TEXT, 
+                parse_mode="Markdown", 
+                disable_web_page_preview=True
+            )
             return
         clean_query = text
+
     elif chat_type in ['group', 'supergroup']:
         if not await is_allowed_group(update, context):
             return
@@ -301,6 +355,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             and update.message.reply_to_message.from_user 
             and update.message.reply_to_message.from_user.id == context.bot.id
         )
+        
         mention_pattern = rf'@{re.escape(BOT_USERNAME)}'
         has_mention = bool(re.search(mention_pattern, text, re.IGNORECASE))
 
@@ -308,11 +363,18 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         clean_query = re.sub(mention_pattern, '', text, flags=re.IGNORECASE).strip()
+
     else:
         return
 
-    phrases_to_remove = ["اريد كتاب", "أريد كتاب", "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب", "اريد", "أريد", "كتاب", "رواية"]
-    for phrase in sorted(phrases_to_remove, key=len, reverse=True):
+    phrases_to_remove = [
+        "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
+        "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب", 
+        "اريد", "أريد", "كتاب", "رواية"
+    ]
+    phrases_to_remove = sorted(phrases_to_remove, key=len, reverse=True)
+    
+    for phrase in phrases_to_remove:
         if clean_query.startswith(phrase):
             clean_query = clean_query[len(phrase):].strip()
             break
@@ -321,9 +383,10 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         clean_query = text
 
     norm_query = normalize_arabic(clean_query)
+
     if not norm_query or len(norm_query) < 2:
         if chat_type == 'private':
-            await update.message.reply_text("⚠️ يرجى كتابة اسم كتاب صالح للبحث.")
+            await update.message.reply_text("⚠️ يرجى كتابة اسم كتاب أو كلمة بحث صالحة تحتوي على أحرف.")
         return
 
     conn = sqlite3.connect(DB_PATH)
@@ -333,20 +396,26 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn.close()
     
     results = []
+    
     for book_name, msg_id in all_records:
         norm_name = normalize_arabic(book_name)
         if norm_name.startswith(norm_query):
             results.append((book_name, msg_id))
             
     if not results:
+        forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
+        norm_forbidden = [normalize_arabic(p) for p in forbidden_prefixes]
+        
         for book_name, msg_id in all_records:
             norm_name = normalize_arabic(book_name)
             if norm_query in norm_name:
-                results.append((book_name, msg_id))
+                if not any(norm_name.startswith(p) for p in norm_forbidden):
+                    results.append((book_name, msg_id))
     
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
         valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
+        
         if not valid_books:
             valid_books = [sorted_results[0]]
 
@@ -366,16 +435,18 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     init_db()
+    
     application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_callback))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("sync", sync_channel_history))  # أمر أرشفة الملفات السابقة للمشرفين
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("البوت يعمل بكفاءة تامة لسحب الأرشيف القديم والجديد...")
+    print("البوت جاهز ويعمل مع المشرفين المعتمدين...")
     application.run_polling()
 
 if __name__ == "__main__":
