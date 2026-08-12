@@ -35,7 +35,7 @@ DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 FONT_PATH = os.path.join(DATA_DIR, "Amiri-Regular.ttf")
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf"
 
-# معرف القناة الرقمي (استبدله بمعرف قناتك الحقيقي إذا كان مختلفاً)
+# معرف القناة الرقمي
 CHANNEL_NUMERIC_ID = -1004395670008
 
 ADMIN_IDS = [7898871921, 1937491557]
@@ -60,10 +60,10 @@ LEAVE_TEXT = (
 ADMIN_WELCOME_TEXT = (
     f"أهلاً بك في لوحة تحكم بوت أرشيف [{GROUP_NAME}]({GROUP_LINK}) 📚⚙️\n\n"
     "📌 **التعليمات والشروط الكلية لعمل البوت:**\n"
-    "1️⃣ **رفع البوت مشرفاً (Admin):** يجب إضافة البوت مشرفاً في القناة المصدر مع صلاحية نشر/تعديل الرسائل.\n"
-    "2️⃣ **آلية عمل الفهرسة:** البوت يقوم بمسح القناة وحفظ **(أسماء الكتب + أرقام الرسائل)** فقط في قاعدة بيانات خفيفة دون خزن أي ملفات على السيرفر.\n"
-    "3️⃣ **الأرشفة والمسح:** اختر إحدى الدفعات لبدء الفهرسة، وسيظهر لك شريط التقدم والنسبة المئوية مباشرة.\n"
-    "4️⃣ **التحويل المباشر:** عند طلب الأعضاء لأي كتاب، يقوم البوت بإرسال النسخة الأصلية من القناة فوراً.\n\n"
+    "1️⃣ **رفع البوت مشرفاً (Admin):** يجب إضافة البوت مشرفاً في القناة المصدر مع صلاحية تحويل/نشر الرسائل.\n"
+    "2️⃣ **آلية عمل الفهرسة:** البوت يقوم بمسح القناة وحفظ **(أسماء الكتب + أرقام الرسائل)** فقط.\n"
+    "3️⃣ **الأرشفة والمسح:** اختر إحدى الدفعات لبدء الفهرسة مع شريط تقدم مباشر ونسبة مئوية.\n"
+    "4️⃣ **التحويل المباشر:** يتم تحويل الرسالة الأصلية فوراً من القناة عند المطابقة الدقيقة لاسم الكتاب.\n\n"
     "استخدم الأزرار أدناه للتحكم والأرشفة:"
 )
 
@@ -161,7 +161,6 @@ def get_confirm_delete_keyboard():
     ]
     return InlineKeyboardMarkup(keyboard)
 
-# دالة رسم شريط التقدم
 def generate_progress_bar(current, total, length=10):
     percent = float(current) / float(total)
     filled = int(round(length * percent))
@@ -205,30 +204,27 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
             return
 
         try:
-            # استخدام copy_message بدلاً من forward للتحقق دون حظر
-            copied = await context.bot.copy_message(
+            # اختبار الرسالة عبر التوجيه المؤقت مع الحذف
+            fwd = await context.bot.forward_message(
                 chat_id=user_id,
                 from_chat_id=CHANNEL_NUMERIC_ID,
                 message_id=msg_id
             )
             
-            if copied:
-                # نحصل على بيانات الملف ثم نحذف الرسالة المؤقتة من الشات الخاص بالادمن
+            if fwd:
                 cursor.execute("INSERT OR IGNORE INTO archive (book_name, msg_id) VALUES (?, ?)", (f"Book_Msg_{msg_id}", msg_id))
                 added_count += 1
                 try:
-                    await context.bot.delete_message(chat_id=user_id, message_id=copied.message_id)
+                    await context.bot.delete_message(chat_id=user_id, message_id=fwd.message_id)
                 except Exception:
                     pass
 
-        except TelegramError as e:
-            # إذا كانت الرسالة غير موجودة أو فارغة يتم تجاوزها
+        except TelegramError:
             pass
 
         scanned_count += 1
         msg_id += 1
 
-        # تحديث الشاشة كل 100 رسالة بشرائط تقدم وإحصاءات دقيقة
         if scanned_count % 100 == 0 or msg_id > end_id:
             conn.commit()
             bar, percent = generate_progress_bar(scanned_count, total_range)
@@ -251,7 +247,6 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
     conn.commit()
     conn.close()
     
-    # الرسالة النهائية عند اكتمال الدفعة بالكامل
     await status_msg.edit_text(
         f"🎉 *انتهت عملية الفهرسة والتسجيل بنجاح!*\n\n"
         f"📊 *التقرير النهائي للدفعة:*\n"
@@ -667,30 +662,43 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     conn.close()
     
     results = []
+    
+    # مطابقة دقيقة للكلمات لتجنب إرسال "فن الحرب الإسلامي" عند طلب "فن الحرب"
+    exact_pattern = r'\b' + re.escape(norm_query) + r'\b'
+
     for book_name, msg_id in all_records:
         norm_name = normalize_arabic(book_name)
-        if norm_query in norm_name:
-            results.append((book_name, msg_id))
+        
+        # التأكد من عدم وجود كلمات تابعة للعنوان تزيد عن طلب المستخدم بشكل مفاجئ
+        if re.search(exact_pattern, norm_name):
+            # إذا طُلب "فن الحرب" والاسم "فن الحرب الإسلامي"، فلن يطابق إذا اشترطنا عدد كلمات مماثل تقريباً أو مطابقة للعنوان
+            # لتصفية العنوان بدقة:
+            query_words = norm_query.split()
+            name_words = norm_name.split()
+            
+            # السماح بالنتائج ذات الاختلاف البسيط جداً في الزيادة وتجاهل النتائج التي تضيف كلمات كاملة كـ "الإسلامي"
+            if len(name_words) <= len(query_words) + 1:
+                results.append((book_name, msg_id))
     
     if results:
         sent_any = False
         for book_name, msg_id in results:
             try:
-                # استخدام copy_message لإرسال النسخة الأصلية مباشرة
-                await context.bot.copy_message(
+                # استخدام forward_message لتحويل الرسالة الأصلية من القناة مباشرة
+                await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
                     from_chat_id=CHANNEL_NUMERIC_ID,
                     message_id=msg_id
                 )
                 sent_any = True
                 await asyncio.sleep(0.5)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"Forward error: {e}")
 
         if not sent_any and chat_type == 'private':
             await update.message.reply_text(
-                "❌ تعذر إرسال الملف حالياً.\n"
-                "📌 يرجى التأكد من أن المعرف الرقمي للقناة (`CHANNEL_NUMERIC_ID`) صحيح داخل الكود وأن البوت يمتلك صلاحية الوصول للقناة."
+                "❌ تعذر تحويل الملف حالياً.\n"
+                "📌 يرجى التأكد من رفع البوت **مشرفاً (Admin)** داخل القناة ومنحه صلاحية تحويل الرسائل."
             )
     else:
         if chat_type == 'private':
