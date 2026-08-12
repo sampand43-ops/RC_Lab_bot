@@ -2,56 +2,66 @@ import os
 import sqlite3
 import re
 import asyncio
-from io import BytesIO
-
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, 
-    filters, ContextTypes
+    ApplicationBuilder,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    ContextTypes,
 )
-from pyrogram import Client, enums
 
-# استيراد مكتبات PDF للتقرير
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
-import arabic_reshaper
-from bidi.algorithm import get_display
+# مسار التخزين الدائم على Railway
+DATA_DIR = "/app/data"
+if not os.path.exists(DATA_DIR):
+    os.makedirs(DATA_DIR)
 
-# --- الإعدادات وبيانات الاتصال ---
-API_ID = 34123643
-API_HASH = "12dccc6e1dce1c82853587ba04e9694d"
-TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
+DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
-# تم اعتماد اسم معرف القناة لمنع مشكلة Peer ID Invalid
-CHANNEL_ID = "@ReadingCommunity_Library"
+# معرف قناتك الثابت
+CHANNEL_ID = -1004395670008
 
-# قائمة معرفات المشرفين
+# قائمة مشرفي البوت المصرح لهم حصراً بإضافته للمجموعات
 ADMIN_IDS = [7898871921, 1937491557]
 
-BOT_USERNAME = "RCGivvv_bot"
+# معرف البوت وبيانات المجموعة الرئيسية
+BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
 
-# مسار قاعدة البيانات
-DB_PATH = "archive_bot.db"
+# النصوص
+RESTRICTED_TEXT = (
+    f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
+    f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه."
+)
 
-# قاموس لإدارة طلبات إلغاء الأرشفة
-CANCEL_SYNC_REQUESTS = {}
+LEAVE_TEXT = (
+    f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
+    f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه.\n\n"
+    f"سأقوم بالمغادرة الآن..."
+)
 
-# --- دالة تجهيز وإعادة تنظيف النصوص العربية للبحث ---
-def normalize_arabic(text: str) -> str:
-    if not text:
-        return ""
-    text = re.sub(r'[\u064B-\u0652]', '', text)  # إزالة التشكيل
-    text = re.sub(r'[أإآ]', 'ا', text)
-    text = re.sub(r'ة', 'ه', text)
-    text = re.sub(r'ى', 'ي', text)
-    text = re.sub(r'[^a-zA-Z0-9\u0600-\u06FF\s]', ' ', text)
-    return text.lower().strip()
+ADMIN_WELCOME_TEXT = (
+    "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
+    "بصفتك مشرفاً رئيسياً للنظام، تتوفر لك الصلاحيات الكاملة لجميع الخصائص.\n\n"
+    "💡 للحصول على دليل التعليمات وتقسيم الصلاحيات التفصيلي، أرسل الأمر: /help\n\n"
+    "البوت قيد التشغيل وجاهز لخدمتك ✨"
+)
 
-# --- دالة تهيئة قاعدة البيانات ---
+ADMIN_HELP_TEXT = (
+    "📌 *دليل استخدام البوت وتقسيم الصلاحيات*\n\n"
+    "━━━━━━ 👑 *صلاحيات المشرف* ━━━━━━\n\n"
+    "• *تفعيل المجموعات:* يمكنك إضافة البوت لأي مجموعة جديدة لتفعيلها تلقائياً واستخدامها من قِبل الأعضاء.\n\n"
+    "• *البحث الحر في الخاص:* يمكنك البحث واستخراج أي كتاب مباشرة من محادثة البوت الخاصة دون أي قيود.\n\n"
+    "• *الأرشفة الآلية:* بمجرد رفع أي ملف في القناة المربوطة، يتم حفظه وتكشيفه بداخل قاعدة البيانات فوراً.\n\n"
+    "━━━━━━ 👥 *صلاحيات وإرشادات الأعضاء* ━━━━━━\n\n"
+    "• *الاستخدام المقيّد:* يقتصر استخدام الأعضاء للبوت على المجموعات المعتمدة التي قمت بتفعيلها فقط.\n\n"
+    "• *طرق البحث المتاحة:* يمكن للعضو البحث داخل المجموعة عن طريق:\n"
+    "  1️⃣ الإشارة للبوت: `@RCGivvvv_bot اسم الكتاب`\n"
+    "  2️⃣ أو عمل رد (Reply) على أي رسالة للبوت بكتابة اسم الكتاب.\n\n"
+    "• *المنع التلقائي:* لا يمكن للأعضاء استخدام البوت في المحادثات الخاصة أو إضافته لمجموعات خارجية، وسيقوم البوت باعتذار ومغادرة تلقائية."
+)
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -62,301 +72,340 @@ def init_db():
             msg_id INTEGER UNIQUE
         )
     """)
-    cursor.execute("CREATE INDEX IF NOT EXISTS idx_book_name ON archive(book_name);")
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS allowed_groups (
+            chat_id INTEGER PRIMARY KEY,
+            added_by INTEGER
+        )
+    """)
     conn.commit()
     conn.close()
 
-# --- دالة الأرشفة السريعة لمستندات القناة ---
-async def run_fast_doc_sync(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
-    CANCEL_SYNC_REQUESTS[chat_id] = False
-    
-    cancel_btn = InlineKeyboardMarkup([[InlineKeyboardButton("🛑 إلغاء الأرشفة", callback_data="cancel_sync")]])
-    status_msg = await context.bot.send_message(
-        chat_id=chat_id,
-        text="🚀 *جاري الاتصال بالقناة والبدء بأرشفة الملفات فقط...*",
-        parse_mode="Markdown",
-        reply_markup=cancel_btn
-    )
-    
-    try:
-        # استخدام الجلسة للاتصال بالقناة وقراءة الملفات
-        async with Client("my_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=TOKEN) as app:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            
-            added_count = 0
-            skipped_count = 0
-            scanned_count = 0
-            
-            async for message in app.search_messages(CHANNEL_ID, filter=enums.MessagesFilter.DOCUMENT):
-                if CANCEL_SYNC_REQUESTS.get(chat_id, False):
-                    await context.bot.send_message(chat_id=chat_id, text="🛑 *تمت عملية إلغاء الأرشفة بناءً على طلبك.*", parse_mode="Markdown")
-                    break
+def is_group_approved(chat_id: int) -> bool:
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM allowed_groups WHERE chat_id = ?", (chat_id,))
+    row = cursor.fetchone()
+    conn.close()
+    return bool(row)
+
+async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    chat = update.effective_chat
+    if chat and chat.type in ['group', 'supergroup']:
+        if is_group_approved(chat.id):
+            return True
+        else:
+            try:
+                await context.bot.send_message(
+                    chat_id=chat.id,
+                    text=LEAVE_TEXT,
+                    parse_mode="Markdown",
+                    disable_web_page_preview=True
+                )
+            except Exception:
+                pass
+            finally:
+                try:
+                    await context.bot.leave_chat(chat.id)
+                except Exception:
+                    pass
+            return False
+    return True
+
+async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    chat = update.effective_chat
+    if not chat or chat.type not in ['group', 'supergroup']:
+        return
+
+    user_id = update.message.from_user.id if update.message and update.message.from_user else None
+
+    for member in update.message.new_chat_members:
+        if member.id == context.bot.id:
+            if user_id in ADMIN_IDS:
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("INSERT OR REPLACE INTO allowed_groups (chat_id, added_by) VALUES (?, ?)", (chat.id, user_id))
+                conn.commit()
+                conn.close()
                 
-                scanned_count += 1
-                doc = message.document
-                book_name = doc.file_name if doc and doc.file_name else (message.caption or f"Book_{message.id}")
-                
-                cursor.execute("SELECT id FROM archive WHERE msg_id = ?", (message.id,))
-                if cursor.fetchone():
-                    skipped_count += 1
-                else:
-                    cursor.execute("INSERT INTO archive (book_name, msg_id) VALUES (?, ?)", (book_name, message.id))
-                    added_count += 1
-                
-                if scanned_count % 100 == 0:
-                    conn.commit()
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        text="أهلاً بكم! 📚🤖\nتم تفعيل البوت بنجاح لهذه المجموعة بواسطة المشرف."
+                    )
+                except Exception:
+                    pass
+            else:
+                try:
+                    await context.bot.send_message(
+                        chat_id=chat.id,
+                        text=LEAVE_TEXT,
+                        parse_mode="Markdown",
+                        disable_web_page_preview=True
+                    )
+                except Exception:
+                    pass
+                finally:
                     try:
-                        await status_msg.edit_text(
-                            f"⚡ *جاري الأرشفة السريعة...*\n\n"
-                            f"📑 المستندات المفحوصة: `{scanned_count}`\n"
-                            f"➕ الملفات المضافة: `{added_count}`\n"
-                            f"⏭ الملفات المكررة: `{skipped_count}`",
-                            parse_mode="Markdown",
-                            reply_markup=cancel_btn
-                        )
+                        await context.bot.leave_chat(chat.id)
                     except Exception:
                         pass
 
-            conn.commit()
-            conn.close()
-            
-            if not CANCEL_SYNC_REQUESTS.get(chat_id, False):
-                await status_msg.edit_text(
-                    f"✅ *اكتملت الأرشفة السريعة بنجاح!*\n\n"
-                    f"📊 *الإحصائيات النهائية:*\n"
-                    f"• الملفات المفحوصة: `{scanned_count}`\n"
-                    f"• الكتب المضافة: `{added_count}`\n"
-                    f"• الكتب الموجودة سابقاً: `{skipped_count}`",
-                    parse_mode="Markdown"
-                )
-    except Exception as e:
-        await status_msg.edit_text(
-            f"❌ *حدث خطأ أثناء الأرشفة السريعة:*\n`{str(e)}`\n\n"
-            f"تأكد من إعطاء البوت صلاحية مشرف داخل القناة.",
-            parse_mode="Markdown"
-        )
-    finally:
-        CANCEL_SYNC_REQUESTS[chat_id] = False
-
-# --- دالة إنشاء ملف تقرير PDF ---
-def generate_pdf_report():
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT id, book_name, msg_id FROM archive ORDER BY id ASC")
-    rows = cursor.fetchall()
-    conn.close()
-
-    buffer = BytesIO()
-    doc = SimpleDocTemplate(buffer, pagesize=letter, rightMargin=30, leftMargin=30, topMargin=30, bottomMargin=30)
-    story = []
-
-    styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('TitleStyle', parent=styles['Heading1'], fontName='Helvetica-Bold', fontSize=18, alignment=1, spaceAfter=20)
-    cell_style = ParagraphStyle('CellStyle', parent=styles['Normal'], fontName='Helvetica', fontSize=10, alignment=2)
-
-    def prepare_arabic_text(text):
-        if not text: return ""
-        reshaped = arabic_reshaper.reshape(str(text))
-        return get_display(reshaped)
-
-    title_text = prepare_arabic_text(f"تقرير مكتبة {GROUP_NAME}")
-    story.append(Paragraph(title_text, title_style))
-    story.append(Spacer(1, 10))
-
-    data = [[prepare_arabic_text("رقم الرسالة"), prepare_arabic_text("اسم الكتاب"), prepare_arabic_text("#")]]
-    
-    for row in rows:
-        b_id, b_name, m_id = row
-        data.append([
-            prepare_arabic_text(str(m_id)),
-            Paragraph(prepare_arabic_text(b_name), cell_style),
-            prepare_arabic_text(str(b_id))
-        ])
-
-    table = Table(data, colWidths=[100, 380, 40])
-    table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#2C3E50")),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.HexColor("#EAECEE")]),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
-        ('TOPPADDING', (0, 0), (-1, -1), 6),
-    ]))
-    
-    story.append(table)
-    doc.build(story)
-    buffer.seek(0)
-    return buffer
-
-# --- لوحة تحكم المشرفين ---
-def get_admin_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📄 تصدير تقرير (PDF)", callback_data="export_pdf"), InlineKeyboardButton("📊 عرض الإحصائيات السريعة", callback_data="show_stats")],
-        [InlineKeyboardButton("🗑 حذف عدد محدد من الكتب", callback_data="delete_limit"), InlineKeyboardButton("🗑 حذف الأرشيف بالكامل", callback_data="delete_all")],
-        [InlineKeyboardButton("⚡ أرشفة القناة بالكامل (الملفات فقط)", callback_data="start_fast_sync")]
-    ])
-
-# --- معالجة الأمر /start ---
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id in ADMIN_IDS:
-        welcome_text = (
-            f"أهلاً بك في لوحة تحكم بوت أرشيف [{GROUP_NAME}]({GROUP_LINK}) 📚⚙️\n\n"
-            f"📌 *ملاحظة:* زر الأرشفة السريعة يقرأ الملفات والمستندات مباشرة ويتجاهل الرسائل النصية والصور."
-        )
-        await update.message.reply_text(welcome_text, parse_mode="Markdown", reply_markup=get_admin_keyboard())
-    else:
-        text = (
-            f"مرحباً بك في بوت مكتبة [{GROUP_NAME}]({GROUP_LINK}) 📚\n\n"
-            f"ابحث عن أي كتاب بكتابة اسمه مباشرة في الشات."
-        )
-        await update.message.reply_text(text, parse_mode="Markdown")
-
-# --- معالجة الضغط على الأزرار ---
-async def button_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-    user_id = query.from_user.id
-    
-    if user_id not in ADMIN_IDS:
-        return
-
-    data = query.data
-
-    if data == "start_fast_sync":
-        asyncio.create_task(run_fast_doc_sync(query.message.chat_id, context))
-        
-    elif data == "cancel_sync":
-        CANCEL_SYNC_REQUESTS[query.message.chat_id] = True
-        
-    elif data == "show_stats":
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM archive")
-        total_books = cursor.fetchone()[0]
-        conn.close()
-        await query.message.reply_text(f"📊 *إجمالي الكتب المؤرشفة حالياً:* `{total_books}` كتاب.", parse_mode="Markdown")
-        
-    elif data == "export_pdf":
-        msg = await query.message.reply_text("⏳ *جاري توليد تقرير PDF...* ", parse_mode="Markdown")
-        pdf_file = generate_pdf_report()
-        await context.bot.send_document(
-            chat_id=query.message.chat_id,
-            document=pdf_file,
-            filename="Library_Report.pdf",
-            caption="📄 *تقرير بجميع الكتب المؤرشفة في قاعدة البيانات.*",
-            parse_mode="Markdown"
-        )
-        await msg.delete()
-        
-    elif data == "delete_all":
-        confirm_btn = InlineKeyboardMarkup([
-            [InlineKeyboardButton("✅ نعم، احذف الكل", callback_data="confirm_delete_all")],
-            [InlineKeyboardButton("❌ إلغاء", callback_data="cancel_delete")]
-        ])
-        await query.message.reply_text("⚠️ *هل أنت تأكد تماماً من رغبتك في حذف الأرشيف بالكامل؟*", parse_mode="Markdown", reply_markup=confirm_btn)
-        
-    elif data == "confirm_delete_all":
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("DELETE FROM archive")
-        conn.commit()
-        conn.close()
-        await query.message.reply_text("🗑 *تم تفريغ الأرشيف بالكامل بنجاح.*", parse_mode="Markdown")
-        
-    elif data == "delete_limit":
-        context.user_data['awaiting_delete_count'] = True
-        await query.message.reply_text("🔢 *أرسل الآن عدد الكتب الأخيرة التي تريد حذفها من الأرشيف:*", parse_mode="Markdown")
-        
-    elif data == "cancel_delete":
-        await query.message.reply_text("❌ *تمت عملية الإلغاء.*", parse_mode="Markdown")
-
-# --- البحث عن الكتب ومعالجة الرسائل النصية ---
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text.strip()
-
-    # إذا كان الأدمن يريد حذف عدد معين من الكتب
-    if user_id in ADMIN_IDS and context.user_data.get('awaiting_delete_count'):
-        if text.isdigit():
-            count = int(text)
+async def on_bot_left_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message and update.message.left_chat_member:
+        if update.message.left_chat_member.id == context.bot.id:
+            chat_id = update.effective_chat.id
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM archive WHERE id IN (SELECT id FROM archive ORDER BY id DESC LIMIT ?)", (count,))
+            cursor.execute("DELETE FROM allowed_groups WHERE chat_id = ?", (chat_id,))
             conn.commit()
             conn.close()
-            context.user_data['awaiting_delete_count'] = False
-            await update.message.reply_text(f"🗑 *تم حذف آخر {count} كتاب من الأرشيف بنجاح.*", parse_mode="Markdown")
-            return
-        else:
-            await update.message.reply_text("❌ يرجى إدخال رقم صحيح فقط.")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
+
+    if chat_type in ['group', 'supergroup']:
+        if not await is_allowed_group(update, context):
             return
 
-    # إجراء البحث للمستخدمين
-    clean_query = normalize_arabic(text)
-    if len(clean_query) < 2:
-        await update.message.reply_text("🔍 يرجى كتابة اسم كتاب يتكون من حرفين أو أكثر للبحث.")
+    if chat_type == 'private':
+        if user_id in ADMIN_IDS:
+            await update.message.reply_text(
+                ADMIN_WELCOME_TEXT,
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                RESTRICTED_TEXT, 
+                parse_mode="Markdown", 
+                disable_web_page_preview=True
+            )
+    else:
+        await update.message.reply_text(
+            f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
+            f"للبحث عن أي كتاب، يمكنك:\n"
+            f"1️⃣ إشارة للبوت: `@{BOT_USERNAME} اسم الكتاب`\n"
+            f"2️⃣ أو عمل (رد/Reply) على أي رسالة للبوت وكتابة اسم الكتاب مباشرة.",
+            parse_mode="Markdown"
+        )
+
+async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
+
+    if chat_type in ['group', 'supergroup']:
+        if not await is_allowed_group(update, context):
+            return
+        await update.message.reply_text(
+            f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
+            f"للبحث عن أي كتاب، يمكنك:\n"
+            f"1️⃣ إشارة للبوت: `@{BOT_USERNAME} اسم الكتاب`\n"
+            f"2️⃣ أو عمل (رد/Reply) على أي رسالة للبوت وكتابة اسم الكتاب مباشرة.",
+            parse_mode="Markdown"
+        )
+    elif chat_type == 'private':
+        if user_id in ADMIN_IDS:
+            await update.message.reply_text(
+                ADMIN_HELP_TEXT,
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                RESTRICTED_TEXT, 
+                parse_mode="Markdown", 
+                disable_web_page_preview=True
+            )
+
+async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.channel_post
+    if message:
+        msg_id = message.message_id
+        document = message.document or message.video or message.audio
+        
+        if document:
+            book_name = document.file_name or message.caption or "Unknown_Book"
+            
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    "INSERT INTO archive (book_name, msg_id) VALUES (?, ?)",
+                    (book_name, msg_id)
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                pass
+            finally:
+                conn.close()
+
+ARABIC_NUM_WORDS = {
+    'الأول': 1, 'اول': 1, '1': 1,
+    'الثاني': 2, 'ثاني': 2, '2': 2,
+    'الثالث': 3, 'ثالث': 3, '3': 3,
+    'الرابع': 4, 'رابع': 4, '4': 4,
+    'الخامس': 5, 'خامس': 5, '5': 5,
+    'السادس': 6, 'سادس': 6, '6': 6,
+    'السابع': 7, 'سابع': 7, '7': 7,
+    'الثامن': 8, 'ثامن': 8, '8': 8,
+    'التاسع': 9, 'تاسع': 9, '9': 9,
+    'العاشر': 10, 'عاشر': 10, '10': 10,
+}
+
+def extract_part_number(filename):
+    match = re.search(r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
+    if match:
+        val = match.group(2)
+        if val in ARABIC_NUM_WORDS:
+            return ARABIC_NUM_WORDS[val]
+        val_en = val.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
+        if val_en.isdigit():
+            return int(val_en)
+            
+    num_match = re.search(r'[\s\-_]([0-9٠-٩]+|\d+)\s*(?:\.pdf|\.epub|\.zip)?$', filename)
+    if num_match:
+        val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
+        if val.isdigit():
+            return int(val)
+            
+    return 9999
+
+def normalize_arabic(text):
+    if not text:
+        return ""
+    text = re.sub(r'[\u064b-\u0652]', '', text)
+    text = re.sub(r'[إأآٱ]', 'ا', text)
+    text = re.sub(r'ى', 'ي', text)
+    text = re.sub(r'ؤ', 'و', text)
+    text = re.sub(r'ئ', 'ي', text)
+    text = re.sub(r'[^\w\s]', ' ', text)
+    text = text.replace('_', ' ')
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip().lower()
+
+async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.message or not update.message.text:
+        return
+
+    user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
+    text = update.message.text.strip()
+
+    if text.startswith('/'):
+        return
+
+    if chat_type == 'private':
+        if user_id not in ADMIN_IDS:
+            await update.message.reply_text(
+                RESTRICTED_TEXT, 
+                parse_mode="Markdown", 
+                disable_web_page_preview=True
+            )
+            return
+        clean_query = text
+
+    elif chat_type in ['group', 'supergroup']:
+        if not await is_allowed_group(update, context):
+            return
+
+        is_reply_to_bot = (
+            update.message.reply_to_message 
+            and update.message.reply_to_message.from_user 
+            and update.message.reply_to_message.from_user.id == context.bot.id
+        )
+        
+        mention_pattern = rf'@{re.escape(BOT_USERNAME)}'
+        has_mention = bool(re.search(mention_pattern, text, re.IGNORECASE))
+
+        if not (is_reply_to_bot or has_mention):
+            return
+
+        clean_query = re.sub(mention_pattern, '', text, flags=re.IGNORECASE).strip()
+
+    else:
+        return
+
+    phrases_to_remove = [
+        "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
+        "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب", 
+        "اريد", "أريد", "كتاب", "رواية"
+    ]
+    phrases_to_remove = sorted(phrases_to_remove, key=len, reverse=True)
+    
+    for phrase in phrases_to_remove:
+        if clean_query.startswith(phrase):
+            clean_query = clean_query[len(phrase):].strip()
+            break
+            
+    if not clean_query:
+        clean_query = text
+
+    norm_query = normalize_arabic(clean_query)
+
+    if not norm_query or len(norm_query) < 2:
+        if chat_type == 'private':
+            await update.message.reply_text("⚠️ يرجى كتابة اسم كتاب أو كلمة بحث صالحة تحتوي على أحرف.")
         return
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT book_name, msg_id FROM archive")
-    rows = cursor.fetchall()
+    cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
+    all_records = cursor.fetchall()
     conn.close()
-
-    results = []
-    for book_name, msg_id in rows:
-        norm_name = normalize_arabic(book_name)
-        if clean_query in norm_name:
-            results.append((book_name, msg_id))
-
-    if not results:
-        await update.message.reply_text(f"❌ لم يتم العثور على كتاب باسم: `{text}` في المكتبة.", parse_mode="Markdown")
-        return
-
-    if len(results) == 1:
-        msg_id = results[0][1]
-        try:
-            await context.bot.forward_message(chat_id=update.effective_chat.id, from_chat_id=CHANNEL_ID, message_id=msg_id)
-        except Exception:
-            await update.message.reply_text("❌ حدث خطأ عند جلب الملف من القناة، تأكد أن البوت مشرف فيها.")
-    else:
-        buttons = []
-        for b_name, m_id in results[:10]:  # عرض أول 10 نتائج فقط لمنع القوائم الطويلة
-            buttons.append([InlineKeyboardButton(f"📖 {b_name}", callback_data=f"getmsg_{m_id}")])
-        
-        reply_markup = InlineKeyboardMarkup(buttons)
-        await update.message.reply_text(f"🔎 عثرت على عدة نتائج لـ `{text}`، اختر الكتاب المطلوب:", parse_mode="Markdown", reply_markup=reply_markup)
-
-# --- معالجة اختيار كتاب من نتائج البحث المتعددة ---
-async def handle_get_message_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
     
-    if query.data.startswith("getmsg_"):
-        msg_id = int(query.data.split("_")[1])
-        try:
-            await context.bot.forward_message(chat_id=query.message.chat_id, from_chat_id=CHANNEL_ID, message_id=msg_id)
-        except Exception:
-            await query.message.reply_text("❌ تعذر إعادة توجيه الملف. تأكد من وجود البوت كمشرف بالقناة.")
+    results = []
+    
+    for book_name, msg_id in all_records:
+        norm_name = normalize_arabic(book_name)
+        if norm_name.startswith(norm_query):
+            results.append((book_name, msg_id))
+            
+    if not results:
+        forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
+        norm_forbidden = [normalize_arabic(p) for p in forbidden_prefixes]
+        
+        for book_name, msg_id in all_records:
+            norm_name = normalize_arabic(book_name)
+            if norm_query in norm_name:
+                if not any(norm_name.startswith(p) for p in norm_forbidden):
+                    results.append((book_name, msg_id))
+    
+    if results:
+        sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
+        valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
+        
+        if not valid_books:
+            valid_books = [sorted_results[0]]
 
-# --- تشغيل البوت الرئيسي ---
+        for book_name, msg_id in valid_books:
+            try:
+                await context.bot.forward_message(
+                    chat_id=update.effective_chat.id,
+                    from_chat_id=CHANNEL_ID,
+                    message_id=msg_id
+                )
+                await asyncio.sleep(0.5)
+            except Exception:
+                pass
+    else:
+        if chat_type == 'private':
+            await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
+
 def main():
     init_db()
+    
+    TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
     application = ApplicationBuilder().token(TOKEN).build()
 
-    # تسجيل المعالجات (Handlers)
-    application.add_handler(CommandHandler("start", start_command))
-    application.add_handler(CallbackQueryHandler(handle_get_message_callback, pattern="^getmsg_"))
-    application.add_handler(CallbackQueryHandler(button_callback_handler))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
+    application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
+    application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("🚀 البوت يعمل الآن وتأطير الاتصال جاهز...")
+    print("البوت جاهز ويعمل مع المشرفين المعتمدين...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
-
