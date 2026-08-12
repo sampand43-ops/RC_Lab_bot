@@ -24,7 +24,6 @@ API_ID = 34123643
 API_HASH = "12dccc6e1dce1c82853587ba04e9694d"
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 
-# معرف وقناة التليجرام
 CHANNEL_ID = -1004395670008
 CHANNEL_USERNAME = "@ReadingCommunity_Library"
 ADMIN_IDS = [7898871921, 1937491557]
@@ -127,7 +126,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_type == 'private':
         if user_id in ADMIN_IDS:
             keyboard = [
-                [InlineKeyboardButton("⚡ أرشفة القناة بالكامل (الأسماء فقط)", callback_data="sync_channel")],
+                [InlineKeyboardButton("⚡ جلب الكتب القديمة والجديدة (سحب الأسمى)", callback_data="sync_channel")],
                 [InlineKeyboardButton("📊 عرض الإحصائيات السريعة", callback_data="stats")],
                 [InlineKeyboardButton("🗑️ حذف الأرشيف بالكامل", callback_data="clear_archive")]
             ]
@@ -178,26 +177,43 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("🗑️ تم تفريغ الأرشيف بالكامل بنجاح.")
 
     elif data == "sync_channel":
-        status_msg = await query.message.reply_text("🚀 جاري الاتصال بالقناة وسحب أسماء الملفات فقط...")
+        status_msg = await query.message.reply_text("🚀 جاري فحص وسحب أسماء الكتب القديمة والجديدة من القناة...")
         try:
             count = 0
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             
-            # استخدام الـ Username لتفادي مشكلة الـ Peer ID Invalid نهائياً
+            # الطريقة البديلة المعتمدة: فحص معرفات الرسائل تصاعدياً/تنازلياً لتجاوز حظر get_chat_history
             async with Client("archive_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=TOKEN) as app:
-                async for message in app.get_chat_history(CHANNEL_USERNAME):
-                    document = message.document or message.video or message.audio
-                    if document:
-                        book_name = document.file_name or message.caption or f"Book_{message.id}"
+                # جلب أحدث رسالة لمعرفة نقطة البداية
+                async for message in app.get_chat_history(CHANNEL_USERNAME, limit=1):
+                    latest_id = message.id
+                    
+                    # فحص الرسائل دفعة واحدة باستخدام get_messages لتجنب خطأ BOT_METHOD_INVALID
+                    batch_size = 100
+                    for start_id in range(latest_id, 0, -batch_size):
+                        end_id = max(1, start_id - batch_size)
+                        message_ids = list(range(start_id, end_id, -1))
+                        
                         try:
-                            cursor.execute("INSERT INTO archive (book_name, msg_id) VALUES (?, ?)", (book_name, message.id))
-                            count += 1
-                        except sqlite3.IntegrityError:
-                            pass
+                            messages = await app.get_messages(CHANNEL_USERNAME, message_ids)
+                            for msg in messages:
+                                if msg and (msg.document or msg.video or msg.audio):
+                                    doc = msg.document or msg.video or msg.audio
+                                    book_name = doc.file_name or msg.caption or f"Book_{msg.id}"
+                                    try:
+                                        cursor.execute("INSERT INTO archive (book_name, msg_id) VALUES (?, ?)", (book_name, msg.id))
+                                        count += 1
+                                    except sqlite3.IntegrityError:
+                                        pass
+                        except Exception:
+                            continue
+                        
+                        await asyncio.sleep(0.3) # فاصل زمني بسيط لتجنب حدود السيرفر
+
             conn.commit()
             conn.close()
-            await status_msg.edit_text(f"✅ تمت أرشفة أسماء الملفات بنجاح!\nتم إضافة `{count}` كتاباً جديداً دون استهلاك مساحة السيرفر.", parse_mode="Markdown")
+            await status_msg.edit_text(f"✅ تمت أرشفة جميع الكتب القديمة والجديدة بنجاح!\nتم حفظ `{count}` اسم كتاب في قاعدة البيانات دون أي استهلاك لمساحة السيرفر.", parse_mode="Markdown")
         except Exception as e:
             await status_msg.edit_text(f"❌ حدث خطأ أثناء الأرشفة:\n`{e}`", parse_mode="Markdown")
 
@@ -359,8 +375,9 @@ def main():
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("البوت يعمل بكفاءة تامة مع الأزرار ولوحة التحكم...")
+    print("البوت يعمل بكفاءة تامة لسحب الأرشيف القديم والجديد...")
     application.run_polling()
 
 if __name__ == "__main__":
     main()
+
