@@ -2,32 +2,30 @@ import os
 import sqlite3
 import re
 import asyncio
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
 from pyrogram import Client
 
-# مسار التخزين الدائم على Railway (قاعدة البيانات فقط لا تأخذ أي مساحة تذكر)
+# مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
-# بيانات Pyrogram لجلب أسماء الملفات القديمة من القناة
 API_ID = 34123643
 API_HASH = "12dccc6e1dce1c82853587ba04e9694d"
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 
-# معرف قناتك الثابت
+# معرف قناتك
 CHANNEL_ID = -1004395670008
-
-# قائمة مشرفي البوت المصرح لهم حصراً
 ADMIN_IDS = [7898871921, 1937491557]
 
 BOT_USERNAME = "RCGivvvv_bot"
@@ -43,12 +41,6 @@ LEAVE_TEXT = (
     f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
     f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه.\n\n"
     f"سأقوم بالمغادرة الآن..."
-)
-
-ADMIN_WELCOME_TEXT = (
-    "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
-    "• يتم تخزين أسماء الكتب ومعرفاتها فقط في قاعدة البيانات دون تحميل الملفات لعدم استهلاك مساحة السيرفر.\n"
-    "• أرسل الأمر `/sync` في الخاصة لجلب أسماء جميع الملفات القديمة من القناة دفعة واحدة."
 )
 
 def init_db():
@@ -123,40 +115,7 @@ async def on_bot_left_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.commit()
             conn.close()
 
-# --- دالة جلب أسماء الملفات القديمة فقط (دون تحميل محتواها) ---
-async def sync_channel_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id not in ADMIN_IDS:
-        return
-
-    status_msg = await update.message.reply_text("🚀 جاري سحب وتخزين أسماء الملفات فقط من القناة...")
-    
-    try:
-        count = 0
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        
-        # سحب سجل الرسائل وقراءة أسماء الملفات ومعرفاتها فقط
-        async with Client("archive_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=TOKEN) as app:
-            async for message in app.get_chat_history(CHANNEL_ID):
-                document = message.document or message.video or message.audio
-                if document:
-                    book_name = document.file_name or message.caption or f"Book_{message.id}"
-                    msg_id = message.id
-                    try:
-                        cursor.execute(
-                            "INSERT INTO archive (book_name, msg_id) VALUES (?, ?)",
-                            (book_name, msg_id)
-                        )
-                        count += 1
-                    except sqlite3.IntegrityError:
-                        pass
-                        
-        conn.commit()
-        conn.close()
-        await status_msg.edit_text(f"✅ تمت أرشفة أسماء الملفات بنجاح!\nتم حفظ `{count}` اسم كتاب جديد في قاعدة البيانات دون أي استهلاك لمساحة السيرفر.")
-    except Exception as e:
-        await status_msg.edit_text(f"❌ حدث خطأ:\n`{e}`", parse_mode="Markdown")
-
+# --- لوحة التحكم والأزرار للمشرف ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
@@ -166,7 +125,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if chat_type == 'private':
         if user_id in ADMIN_IDS:
-            await update.message.reply_text(ADMIN_WELCOME_TEXT, parse_mode="Markdown")
+            keyboard = [
+                [InlineKeyboardButton("⚡ أرشفة القناة بالكامل (الأسماء فقط)", callback_data="sync_channel")],
+                [InlineKeyboardButton("📊 عرض الإحصائيات السريعة", callback_data="stats")],
+                [InlineKeyboardButton("🗑️ حذف الأرشيف بالكامل", callback_data="clear_archive")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(
+                "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
+                "• يتم تخزين أسماء الكتب ومعرفاتها فقط لعدم استهلاك مساحة السيرفر.\n"
+                "• اختر إحدى العمليات أدناه من الأزرار:",
+                reply_markup=reply_markup
+            )
         else:
             await update.message.reply_text(RESTRICTED_TEXT, parse_mode="Markdown", disable_web_page_preview=True)
     else:
@@ -178,13 +148,58 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown"
         )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_chat.type in ['group', 'supergroup'] and not await is_allowed_group(update, context):
+# --- معالجة الضغط على الأزرار ---
+async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+
+    if user_id not in ADMIN_IDS:
+        await query.edit_message_text("❌ عذراً، هذا الأمر مخصص للمشرفين فقط.")
         return
-    if update.effective_user.id in ADMIN_IDS:
-        await update.message.reply_text("📌 أمر الأرشفة المتاحة:\n`/sync` - لجلب أسماء الملفات القديمة من القناة.", parse_mode="Markdown")
-    else:
-        await update.message.reply_text(RESTRICTED_TEXT, parse_mode="Markdown", disable_web_page_preview=True)
+
+    data = query.data
+
+    if data == "stats":
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(DISTINCT msg_id) FROM archive")
+        count = cursor.fetchone()[0]
+        conn.close()
+        await query.message.reply_text(f"📊 إحصائيات الأرشيف الحالية:\nعدد الكتب المسجلة: `{count}` كتاباً.", parse_mode="Markdown")
+
+    elif data == "clear_archive":
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM archive")
+        conn.commit()
+        conn.close()
+        await query.message.reply_text("🗑️ تم تفريغ الأرشيف بالكامل بنجاح.")
+
+    elif data == "sync_channel":
+        status_msg = await query.message.reply_text("🚀 جاري الاتصال بالقناة وسحب أسماء الملفات فقط...")
+        try:
+            count = 0
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            
+            # حل مشكلة الـ Peer عن طريق جلب معلومات القناة أولاً داخل الجلسة
+            async with Client("archive_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=TOKEN) as app:
+                chat = await app.get_chat(CHANNEL_ID)
+                async for message in app.get_chat_history(chat.id):
+                    document = message.document or message.video or message.audio
+                    if document:
+                        book_name = document.file_name or message.caption or f"Book_{message.id}"
+                        try:
+                            cursor.execute("INSERT INTO archive (book_name, msg_id) VALUES (?, ?)", (book_name, message.id))
+                            count += 1
+                        except sqlite3.IntegrityError:
+                            pass
+            conn.commit()
+            conn.close()
+            await status_msg.edit_text(f"✅ تمت أرشفة أسماء الملفات بنجاح!\nتم إضافة `{count}` كتاباً جديداً دون استهلاك مساحة السيرفر.", parse_mode="Markdown")
+        except Exception as e:
+            await status_msg.edit_text(f"❌ حدث خطأ أثناء الأرشفة:\n`{e}`", parse_mode="Markdown")
 
 # --- تخزين اسم الملف للرسائل الجديدة فور نشرها في القناة ---
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -321,7 +336,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         for book_name, msg_id in valid_books:
             try:
-                # إرسال الكتاب عبر إعادة التوجيه المباشر من القناة دون تحميله للسيرفر نهائياً
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
                     from_chat_id=CHANNEL_ID,
@@ -339,14 +353,13 @@ def main():
     application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("sync", sync_channel_history))
+    application.add_handler(CallbackQueryHandler(button_callback))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
 
-    print("البوت يعمل بكفاءة تامة (تخزين الأسماء والـ IDs فقط دون استهلاك مساحة السيرفر)...")
+    print("البوت يعمل بكفاءة تامة مع الأزرار ولوحة التحكم...")
     application.run_polling()
 
 if __name__ == "__main__":
