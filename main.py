@@ -63,7 +63,7 @@ ADMIN_WELCOME_TEXT = (
     "**تعليمات استخدام البوت للمشرفين:**\n"
     "• **عرض الإحصائيات:** لمعرفة إجمالي الكتب ورقم آخر رسالة محفوظة.\n"
     "• **تصدير تقرير (PDF):** لتوليد ملف يحتوي على قائمة جميع الكتب المؤرشفة.\n"
-    "• **الأرشفة:** اختيار إحدى الدفعات لبدء فحص وحفظ الكتب تلقائياً مع إمكانية إلغاء العملية فوراً عبر زر الإيقاف.\n"
+    "• **الأرشفة:** اختيار إحدى الدفعات لبدء فحص وحفظ فهرس الكتب تلقائياً مع إمكانية إلغاء العملية فوراً.\n"
     "• **حذف الأرشيف / عدد محدد:** لإدارة وتطهير السجلات أو مسح أحدث كتب مضافة.\n\n"
     "استخدم الأزرار أدناه للتحكم:"
 )
@@ -72,13 +72,12 @@ def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     
+    # القاعدة تخزن فقط اسم الكتاب ورقم الرسالة في القناة
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             book_name TEXT,
-            msg_id INTEGER UNIQUE,
-            file_unique_id TEXT UNIQUE,
-            file_id TEXT
+            msg_id INTEGER UNIQUE
         )
     """)
     cursor.execute("""
@@ -88,22 +87,7 @@ def init_db():
         )
     """)
     
-    try:
-        cursor.execute("ALTER TABLE archive ADD COLUMN file_unique_id TEXT;")
-    except sqlite3.OperationalError:
-        pass
-
-    try:
-        cursor.execute("ALTER TABLE archive ADD COLUMN file_id TEXT;")
-    except sqlite3.OperationalError:
-        pass
-        
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_book_name ON archive(book_name);")
-    try:
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_file_uid ON archive(file_unique_id);")
-    except sqlite3.OperationalError:
-        pass
-
     conn.commit()
     conn.close()
 
@@ -185,7 +169,7 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
     CANCEL_SYNC_REQUESTS[chat_id] = False
     status_msg = await context.bot.send_message(
         chat_id=chat_id,
-        text=f"⏳ جاري بدء أرشفة القناة للدفعة ({start_id:,} إلى {end_id:,})...\nيرجى الانتظار.",
+        text=f"⏳ جاري مسح القناة وفهرسة الكتب للدفعة ({start_id:,} إلى {end_id:,})...\nيرجى الانتظار.",
         reply_markup=get_cancel_sync_keyboard()
     )
     
@@ -203,10 +187,10 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
             conn.close()
             try:
                 await status_msg.edit_text(
-                    f"🛑 *تم إيقاف عملية الأرشفة بنجاح!*\n\n"
+                    f"🛑 *تم إيقاف عملية الفهرسة بنجاح!*\n\n"
                     f"📊 *النتائج حتى لحظة الإيقاف:*\n"
                     f"• الرسائل المفحوصة: {scanned_count:,}\n"
-                    f"• الكتب الجديدة المضافة: {added_count:,}\n"
+                    f"• الكتب المفهرسة الجديدة: {added_count:,}\n"
                     f"• المكررة المتجاوزة: {skipped_duplicates:,}",
                     parse_mode="Markdown",
                     reply_markup=get_admin_keyboard()
@@ -234,19 +218,14 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
                 document = fwd_msg.document or fwd_msg.video or fwd_msg.audio
                 if document:
                     book_name = document.file_name or fwd_msg.caption or "Unknown_Book"
-                    file_uid = document.file_unique_id
-                    raw_file_id = document.file_id
 
-                    cursor.execute(
-                        "SELECT 1 FROM archive WHERE file_unique_id = ? OR book_name = ?", 
-                        (file_uid, book_name)
-                    )
+                    cursor.execute("SELECT 1 FROM archive WHERE msg_id = ? OR book_name = ?", (msg_id, book_name))
                     if cursor.fetchone():
                         skipped_duplicates += 1
                     else:
                         cursor.execute(
-                            "INSERT OR IGNORE INTO archive (book_name, msg_id, file_unique_id, file_id) VALUES (?, ?, ?, ?)",
-                            (book_name, msg_id, file_uid, raw_file_id)
+                            "INSERT OR IGNORE INTO archive (book_name, msg_id) VALUES (?, ?)",
+                            (book_name, msg_id)
                         )
                         added_count += 1
                 
@@ -262,7 +241,7 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
                 conn.commit()
                 try:
                     await status_msg.edit_text(
-                        f"⏳ جاري الأرشفة...\n"
+                        f"⏳ جاري المسح والفهرسة...\n"
                         f"• تم فحص: {scanned_count:,}\n"
                         f"• كتب جديدة: {added_count:,}\n"
                         f"• مكرر ومتجاوز: {skipped_duplicates:,}",
@@ -289,10 +268,10 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
     conn.close()
     
     await status_msg.edit_text(
-        f"✅ *اكتملت أرشفة الدفعة بنجاح!*\n\n"
+        f"✅ *اكتملت فهرسة الدفعة بنجاح!*\n\n"
         f"📊 *التقرير النهائي:*\n"
         f"• الرسائل المفحوصة: {scanned_count:,}\n"
-        f"• الكتب الجديدة المضافة: {added_count:,}\n"
+        f"• الكتب المفهرسة الجديدة: {added_count:,}\n"
         f"• المكررة المتجاوزة: {skipped_duplicates:,}",
         parse_mode="Markdown",
         reply_markup=get_admin_keyboard()
@@ -310,7 +289,7 @@ async def show_stats_text(chat_id: int, context: ContextTypes.DEFAULT_TYPE):
 
     text = (
         f"📊 *إحصائيات الأرشيف الحالي:*\n\n"
-        f"• *إجمالي الكتب المؤرشفة:* {total_books:,} كتاب 📚\n"
+        f"• *إجمالي الكتب المفهرسة:* {total_books:,} كتاب 📚\n"
         f"• *رقم آخر رسالة محفوظة:* {last_msg_id:,}"
     )
     
@@ -354,7 +333,7 @@ async def generate_pdf_report(chat_id: int, user_id: int, context: ContextTypes.
     title_style = ParagraphStyle('ArabicTitle', parent=styles['Title'], fontName='Amiri', fontSize=16, leading=22, alignment=1)
 
     story = []
-    title_text = reshape_arabic(f"📚 قائمة الكتب المؤرشفة - مجتمع القراءة (الإجمالي: {total_count:,} كتاب)")
+    title_text = reshape_arabic(f"📚 قائمة الكتب المفهرسة - مجتمع القراءة (الإجمالي: {total_count:,} كتاب)")
     story.append(Paragraph(title_text, title_style))
     story.append(Spacer(1, 15))
 
@@ -376,7 +355,7 @@ async def generate_pdf_report(chat_id: int, user_id: int, context: ContextTypes.
             chat_id=user_id,
             document=pdf_file,
             filename="قائمة_الكتب_المؤرشفة.pdf",
-            caption=f"📊 *إحصائيات الأرشيف الحالي:*\n\n• *عدد الكتب المحفوظة:* {total_count:,} كتاب 📚",
+            caption=f"📊 *إحصائيات الأرشيف الحالي:*\n\n• *عدد الكتب المفهرسة:* {total_count:,} كتاب 📚",
             parse_mode="Markdown",
             reply_markup=get_admin_keyboard()
         )
@@ -618,15 +597,13 @@ async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE
         
         if document:
             book_name = document.file_name or message.caption or "Unknown_Book"
-            file_uid = document.file_unique_id
-            raw_file_id = document.file_id
             
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
             try:
                 cursor.execute(
-                    "INSERT OR IGNORE INTO archive (book_name, msg_id, file_unique_id, file_id) VALUES (?, ?, ?, ?)",
-                    (book_name, msg_id, file_uid, raw_file_id)
+                    "INSERT OR IGNORE INTO archive (book_name, msg_id) VALUES (?, ?)",
+                    (book_name, msg_id)
                 )
                 conn.commit()
             except sqlite3.IntegrityError:
@@ -759,15 +736,15 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT book_name, msg_id, file_id FROM archive GROUP BY msg_id")
+    cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
     all_records = cursor.fetchall()
     conn.close()
     
     results = []
-    for book_name, msg_id, file_id in all_records:
+    for book_name, msg_id in all_records:
         norm_name = normalize_arabic(book_name)
         if norm_query in norm_name:
-            results.append((book_name, msg_id, file_id))
+            results.append((book_name, msg_id))
     
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
@@ -777,49 +754,19 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             valid_books = [sorted_results[0]]
 
         sent_any = False
-        for book_name, msg_id, file_id in valid_books:
+        for book_name, msg_id in valid_books:
             sent_this = False
             
-            # 1️⃣ تجربة الإرسال المباشر بـ file_id
-            if file_id:
-                try:
-                    await context.bot.send_document(
-                        chat_id=update.effective_chat.id,
-                        document=file_id
-                    )
-                    sent_this = True
-                    sent_any = True
-                except Exception:
-                    pass
-            
-            # 2️⃣ تجربة النسخ المباشر من معرف القناة العام
-            if not sent_this:
-                try:
-                    await context.bot.copy_message(
-                        chat_id=update.effective_chat.id,
-                        from_chat_id=CHANNEL_USERNAME,
-                        message_id=msg_id
-                    )
-                    sent_this = True
-                    sent_any = True
-                except Exception:
-                    pass
-
-            # 3️⃣ تجربة التوجيه المباشر من معرف القناة العام
-            if not sent_this:
-                try:
-                    await context.bot.forward_message(
-                        chat_id=update.effective_chat.id,
-                        from_chat_id=CHANNEL_USERNAME,
-                        message_id=msg_id
-                    )
-                    sent_this = True
-                    sent_any = True
-                except Exception:
-                    pass
-
-            # 4️⃣ تجربة التوجيه من المعرف الرقمي الاحتياطي
-            if not sent_this:
+            # التحويل المباشر والفريد من القناة فقط (Forwarding)
+            try:
+                await context.bot.forward_message(
+                    chat_id=update.effective_chat.id,
+                    from_chat_id=CHANNEL_USERNAME,
+                    message_id=msg_id
+                )
+                sent_this = True
+                sent_any = True
+            except Exception:
                 try:
                     await context.bot.forward_message(
                         chat_id=update.effective_chat.id,
@@ -834,13 +781,11 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if sent_this:
                 await asyncio.sleep(0.5)
 
-        # في حال الفشل: لا يرسل أي رسالة بالكروب إطلاقاً
         if not sent_any and chat_type == 'private':
-            await update.message.reply_text(f"❌ عذراً، تعذر إرسال الملف حالياً.")
+            await update.message.reply_text(f"❌ عذراً، تعذر تحويل الملف من القناة حالياً.")
     else:
-        # عند عدم العثور على الكتاب: صمت كامل بالمجموعات، يرد بالخاص فقط
         if chat_type == 'private':
-            await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
+            await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في القناة.")
 
 def main():
     init_db()
