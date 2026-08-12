@@ -35,8 +35,10 @@ DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 FONT_PATH = os.path.join(DATA_DIR, "Amiri-Regular.ttf")
 FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/amiri/Amiri-Regular.ttf"
 
-# معرف القناة الرقمي المباشر والدقيق
-CHANNEL_ID = -1004395670008
+# معرفات القناة العامة والرقمية
+CHANNEL_USERNAME = "@ReadingCommunity_Library"
+CHANNEL_NUMERIC_ID = -1004395670008
+
 ADMIN_IDS = [7898871921, 1937491557]
 
 BOT_USERNAME = "RCGivvv_bot"
@@ -214,35 +216,44 @@ async def run_sync_process(chat_id: int, user_id: int, start_id: int, end_id: in
             return
 
         try:
-            fwd_msg = await context.bot.forward_message(
-                chat_id=user_id,
-                from_chat_id=CHANNEL_ID,
-                message_id=msg_id
-            )
-            
-            document = fwd_msg.document or fwd_msg.video or fwd_msg.audio
-            if document:
-                book_name = document.file_name or fwd_msg.caption or "Unknown_Book"
-                file_uid = document.file_unique_id
-                raw_file_id = document.file_id
-
-                cursor.execute(
-                    "SELECT 1 FROM archive WHERE file_unique_id = ? OR book_name = ?", 
-                    (file_uid, book_name)
-                )
-                if cursor.fetchone():
-                    skipped_duplicates += 1
-                else:
-                    cursor.execute(
-                        "INSERT OR IGNORE INTO archive (book_name, msg_id, file_unique_id, file_id) VALUES (?, ?, ?, ?)",
-                        (book_name, msg_id, file_uid, raw_file_id)
-                    )
-                    added_count += 1
-            
+            fwd_msg = None
             try:
-                await fwd_msg.delete()
+                fwd_msg = await context.bot.forward_message(
+                    chat_id=user_id,
+                    from_chat_id=CHANNEL_USERNAME,
+                    message_id=msg_id
+                )
             except Exception:
-                pass
+                fwd_msg = await context.bot.forward_message(
+                    chat_id=user_id,
+                    from_chat_id=CHANNEL_NUMERIC_ID,
+                    message_id=msg_id
+                )
+
+            if fwd_msg:
+                document = fwd_msg.document or fwd_msg.video or fwd_msg.audio
+                if document:
+                    book_name = document.file_name or fwd_msg.caption or "Unknown_Book"
+                    file_uid = document.file_unique_id
+                    raw_file_id = document.file_id
+
+                    cursor.execute(
+                        "SELECT 1 FROM archive WHERE file_unique_id = ? OR book_name = ?", 
+                        (file_uid, book_name)
+                    )
+                    if cursor.fetchone():
+                        skipped_duplicates += 1
+                    else:
+                        cursor.execute(
+                            "INSERT OR IGNORE INTO archive (book_name, msg_id, file_unique_id, file_id) VALUES (?, ?, ?, ?)",
+                            (book_name, msg_id, file_uid, raw_file_id)
+                        )
+                        added_count += 1
+                
+                try:
+                    await fwd_msg.delete()
+                except Exception:
+                    pass
 
             scanned_count += 1
             msg_id += 1
@@ -599,7 +610,6 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 disable_web_page_preview=True
             )
 
-# دالة لالتقاط أي منشور كتاب جديد ينزل بالقناة تلقائياً
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
     if message:
@@ -768,37 +778,67 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         sent_any = False
         for book_name, msg_id, file_id in valid_books:
-            # 1️⃣ تجربة الإرسال المباشر عن طريق file_id (سريع ومباشر ودون الحاجة للتوجيه)
+            sent_this = False
+            
+            # 1️⃣ تجربة الإرسال المباشر بـ file_id
             if file_id:
                 try:
                     await context.bot.send_document(
                         chat_id=update.effective_chat.id,
                         document=file_id
                     )
+                    sent_this = True
                     sent_any = True
-                    await asyncio.sleep(0.5)
-                    continue
-                except Exception as e:
-                    print(f"خطأ في الإرسال بـ file_id: {e}")
+                except Exception:
+                    pass
             
-            # 2️⃣ التجربة الاحتياطية: التوجيه المباشر عبر معرف القناة الرقمي CHANNEL_ID
-            try:
-                await context.bot.forward_message(
-                    chat_id=update.effective_chat.id,
-                    from_chat_id=CHANNEL_ID,
-                    message_id=msg_id
-                )
-                sent_any = True
-                await asyncio.sleep(0.5)
-            except Exception as e:
-                print(f"خطأ في توجيه الرسالة {msg_id}: {e}")
+            # 2️⃣ تجربة النسخ المباشر من معرف القناة العام
+            if not sent_this:
+                try:
+                    await context.bot.copy_message(
+                        chat_id=update.effective_chat.id,
+                        from_chat_id=CHANNEL_USERNAME,
+                        message_id=msg_id
+                    )
+                    sent_this = True
+                    sent_any = True
+                except Exception:
+                    pass
 
-        if not sent_any:
-            await update.message.reply_text(
-                "⚠️ تعذر توجيه أو إرسال الملف.\n\n"
-                "يرجى إعادة أرشفة القناة للدفعة المطلوبة لتنظيف السجلات وحفظ المعرفات المباشرة."
-            )
+            # 3️⃣ تجربة التوجيه المباشر من معرف القناة العام
+            if not sent_this:
+                try:
+                    await context.bot.forward_message(
+                        chat_id=update.effective_chat.id,
+                        from_chat_id=CHANNEL_USERNAME,
+                        message_id=msg_id
+                    )
+                    sent_this = True
+                    sent_any = True
+                except Exception:
+                    pass
+
+            # 4️⃣ تجربة التوجيه من المعرف الرقمي الاحتياطي
+            if not sent_this:
+                try:
+                    await context.bot.forward_message(
+                        chat_id=update.effective_chat.id,
+                        from_chat_id=CHANNEL_NUMERIC_ID,
+                        message_id=msg_id
+                    )
+                    sent_this = True
+                    sent_any = True
+                except Exception:
+                    pass
+
+            if sent_this:
+                await asyncio.sleep(0.5)
+
+        # في حال الفشل: لا يرسل أي رسالة بالكروب إطلاقاً
+        if not sent_any and chat_type == 'private':
+            await update.message.reply_text(f"❌ عذراً، تعذر إرسال الملف حالياً.")
     else:
+        # عند عدم العثور على الكتاب: صمت كامل بالمجموعات، يرد بالخاص فقط
         if chat_type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
 
@@ -817,7 +857,6 @@ def main():
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
     
-    # التقاط الكتب والملفات المرسلة حديثاً للقناة تلقائياً
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
     
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
