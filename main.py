@@ -116,7 +116,7 @@ async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not chat or chat.type not in ['group', 'supergroup']:
         return
-[8/12/2026 4:37 AM] اكواد بوت: user_id = update.message.from_user.id if update.message and update.message.from_user else None
+user_id = update.message.from_user.id if update.message and update.message.from_user else None
 
     for member in update.message.new_chat_members:
         if member.id == context.bot.id:
