@@ -17,64 +17,67 @@ from pyrogram.errors import FloodWait
 
 
 # ============================================================
-# بيانات Telegram
-# مأخوذة من الكود الأصلي
+# Telegram credentials
 # ============================================================
+# ضع القيم الحالية في Railway Variables:
+#
+# API_ID
+# API_HASH
+# TOKEN
+#
+# لا تضع TOKEN أو API_HASH داخل GitHub.
 
-API_ID = 34123643
-
-API_HASH = "12dccc6e1dce1c82853587ba04e9694d"
-
-TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
+API_ID = int(os.getenv("API_ID", "0"))
+API_HASH = os.getenv("API_HASH", "")
+TOKEN = os.getenv("TOKEN", "")
 
 
 # ============================================================
 # قناة المكتبة
 # ============================================================
-
+# مهم جداً:
+# استخدم username وليس رقم -100...
+#
 CHANNEL_ID = "@ReadingCommunity_Library"
+
 
 # ============================================================
 # المشرفون
 # ============================================================
-
+# ضع IDs المشرفين الموجودين في كودك الحالي.
+#
 ADMIN_IDS = [
-    7898871921,
-    1937491557,
+    # 123456789,
+    # 987654321,
 ]
 
 
 # ============================================================
 # معلومات البوت والمجموعة
 # ============================================================
-
 BOT_USERNAME = "RCGivvvv_bot"
-
 GROUP_NAME = "مجتمع القراءة Reading Community"
-
 GROUP_LINK = "https://t.me/reading_community_group"
 
 
 # ============================================================
-# قاعدة بيانات المجموعات فقط
-#
-# مهم:
-# لا يتم تخزين الكتب
-# لا يتم تخزين أسماء الملفات
-# لا يتم تخزين message_id للكتب
+# قاعدة البيانات
 # ============================================================
-
+# تستخدم فقط لمعرفة المجموعات المسموح للبوت العمل فيها.
+#
+# لا يتم تخزين أسماء الكتب.
+# لا يتم تخزين الملفات.
+# لا يتم تنزيل أي كتاب إلى Railway.
+#
 DATA_DIR = "/app/data"
-
 os.makedirs(DATA_DIR, exist_ok=True)
 
 DB_PATH = os.path.join(DATA_DIR, "groups.db")
 
 
 # ============================================================
-# رسائل البوت
+# الرسائل
 # ============================================================
-
 RESTRICTED_TEXT = (
     f"عذراً، هذا البوت خاص بمجموعة "
     f"[{GROUP_NAME}]({GROUP_LINK}) "
@@ -106,8 +109,9 @@ ADMIN_HELP_TEXT = (
     "━━━━━━ 👑 *المشرف* ━━━━━━\n\n"
 
     "• يمكن للمشرف إضافة البوت إلى المجموعات المعتمدة.\n"
-    "• لا توجد أرشفة للكتب ولا يتم تخزين أسماء الملفات.\n"
-    "• البحث يتم مباشرة في سجل القناة عند طلب الكتاب.\n\n"
+    "• لا يتم تخزين أسماء الكتب أو الملفات.\n"
+    "• لا يتم تنزيل الكتب إلى Railway.\n"
+    "• البحث يتم مباشرة في سجل قناة المكتبة عند الطلب.\n\n"
 
     "━━━━━━ 👥 *الأعضاء* ━━━━━━\n\n"
 
@@ -119,13 +123,10 @@ ADMIN_HELP_TEXT = (
 
 
 # ============================================================
-# إنشاء قاعدة البيانات
+# Database
 # ============================================================
-
 def init_db():
-
     conn = sqlite3.connect(DB_PATH)
-
     cursor = conn.cursor()
 
     cursor.execute(
@@ -138,18 +139,11 @@ def init_db():
     )
 
     conn.commit()
-
     conn.close()
 
 
-# ============================================================
-# التحقق من المجموعة
-# ============================================================
-
 def is_group_approved(chat_id: int) -> bool:
-
     conn = sqlite3.connect(DB_PATH)
-
     cursor = conn.cursor()
 
     cursor.execute(
@@ -158,16 +152,14 @@ def is_group_approved(chat_id: int) -> bool:
     )
 
     row = cursor.fetchone()
-
     conn.close()
 
     return bool(row)
 
 
 # ============================================================
-# التحقق من صلاحية المجموعة
+# التحقق من المجموعة
 # ============================================================
-
 async def is_allowed_group(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -175,42 +167,25 @@ async def is_allowed_group(
 
     chat = update.effective_chat
 
-    if not chat:
-        return False
-
-    if chat.type in ("group", "supergroup"):
+    if chat and chat.type in ("group", "supergroup"):
 
         if is_group_approved(chat.id):
             return True
 
         try:
-
             await context.bot.send_message(
                 chat_id=chat.id,
                 text=LEAVE_TEXT,
                 parse_mode="Markdown",
                 disable_web_page_preview=True,
             )
-
-        except Exception as e:
-
-            print(
-                "[Send leave message error]",
-                type(e).__name__,
-                str(e),
-            )
+        except Exception:
+            pass
 
         try:
-
             await context.bot.leave_chat(chat.id)
-
-        except Exception as e:
-
-            print(
-                "[Leave group error]",
-                type(e).__name__,
-                str(e),
-            )
+        except Exception:
+            pass
 
         return False
 
@@ -220,7 +195,6 @@ async def is_allowed_group(
 # ============================================================
 # عند إضافة البوت إلى مجموعة
 # ============================================================
-
 async def on_added_to_group(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -240,24 +214,21 @@ async def on_added_to_group(
     if not update.message.new_chat_members:
         return
 
-    user_id = None
-
-    if update.message.from_user:
-        user_id = update.message.from_user.id
+    user_id = (
+        update.message.from_user.id
+        if update.message.from_user
+        else None
+    )
 
     for member in update.message.new_chat_members:
 
         if member.id != context.bot.id:
             continue
 
-        # ----------------------------------------------------
-        # إذا أضافه أحد المشرفين
-        # ----------------------------------------------------
-
+        # المشرف فقط يستطيع تفعيل البوت
         if user_id in ADMIN_IDS:
 
             conn = sqlite3.connect(DB_PATH)
-
             cursor = conn.cursor()
 
             cursor.execute(
@@ -266,18 +237,13 @@ async def on_added_to_group(
                 (chat_id, added_by)
                 VALUES (?, ?)
                 """,
-                (
-                    chat.id,
-                    user_id,
-                ),
+                (chat.id, user_id),
             )
 
             conn.commit()
-
             conn.close()
 
             try:
-
                 await context.bot.send_message(
                     chat_id=chat.id,
                     text=(
@@ -286,55 +252,30 @@ async def on_added_to_group(
                         "بواسطة المشرف."
                     ),
                 )
-
-            except Exception as e:
-
-                print(
-                    "[Welcome error]",
-                    type(e).__name__,
-                    str(e),
-                )
-
-        # ----------------------------------------------------
-        # إذا أضافه شخص غير مشرف
-        # ----------------------------------------------------
+            except Exception:
+                pass
 
         else:
 
             try:
-
                 await context.bot.send_message(
                     chat_id=chat.id,
                     text=LEAVE_TEXT,
                     parse_mode="Markdown",
                     disable_web_page_preview=True,
                 )
-
-            except Exception as e:
-
-                print(
-                    "[Unauthorized group message error]",
-                    type(e).__name__,
-                    str(e),
-                )
+            except Exception:
+                pass
 
             try:
-
                 await context.bot.leave_chat(chat.id)
-
-            except Exception as e:
-
-                print(
-                    "[Unauthorized group leave error]",
-                    type(e).__name__,
-                    str(e),
-                )
+            except Exception:
+                pass
 
 
 # ============================================================
-# عند خروج البوت من المجموعة
+# عند مغادرة البوت
 # ============================================================
-
 async def on_bot_left_group(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -352,7 +293,6 @@ async def on_bot_left_group(
     chat_id = update.effective_chat.id
 
     conn = sqlite3.connect(DB_PATH)
-
     cursor = conn.cursor()
 
     cursor.execute(
@@ -361,14 +301,12 @@ async def on_bot_left_group(
     )
 
     conn.commit()
-
     conn.close()
 
 
 # ============================================================
-# تنظيف النص العربي
+# تنظيف وتوحيد النص العربي
 # ============================================================
-
 def normalize_arabic(text: str) -> str:
 
     if not text:
@@ -377,62 +315,31 @@ def normalize_arabic(text: str) -> str:
     text = str(text)
 
     # إزالة التشكيل
-    text = re.sub(
-        r"[\u064b-\u0652]",
-        "",
-        text,
-    )
+    text = re.sub(r"[\u064b-\u0652]", "", text)
 
     # توحيد الألف
-    text = re.sub(
-        r"[إأآٱ]",
-        "ا",
-        text,
-    )
+    text = re.sub(r"[إأآٱ]", "ا", text)
 
-    # توحيد الياء
-    text = text.replace(
-        "ى",
-        "ي",
-    )
+    # توحيد بعض الحروف
+    text = text.replace("ى", "ي")
+    text = text.replace("ؤ", "و")
+    text = text.replace("ئ", "ي")
 
-    # توحيد الواو
-    text = text.replace(
-        "ؤ",
-        "و",
-    )
+    # underscore إلى مسافة
+    text = text.replace("_", " ")
 
-    # توحيد الياء الهمزية
-    text = text.replace(
-        "ئ",
-        "ي",
-    )
+    # إزالة الرموز
+    text = re.sub(r"[^\w\s]", " ", text)
 
-    text = text.replace(
-        "_",
-        " ",
-    )
-
-    # إزالة الرموز مع إبقاء الحروف والأرقام
-    text = re.sub(
-        r"[^\w\s]",
-        " ",
-        text,
-    )
-
-    text = re.sub(
-        r"\s+",
-        " ",
-        text,
-    )
+    # إزالة المسافات الزائدة
+    text = re.sub(r"\s+", " ", text)
 
     return text.strip().lower()
 
 
 # ============================================================
-# تنظيف طلب البحث
+# تنظيف طلب المستخدم
 # ============================================================
-
 def clean_search_query(text: str) -> str:
 
     phrases = [
@@ -450,26 +357,20 @@ def clean_search_query(text: str) -> str:
         "رواية",
     ]
 
-    phrases.sort(
-        key=len,
-        reverse=True,
-    )
+    phrases.sort(key=len, reverse=True)
 
     for phrase in phrases:
 
         if text.startswith(phrase):
-
             return text[len(phrase):].strip()
 
     return text.strip()
 
 
 # ============================================================
-# الأرقام العربية للأجزاء
+# كلمات الأجزاء
 # ============================================================
-
 ARABIC_NUM_WORDS = {
-
     "الأول": 1,
     "اول": 1,
     "1": 1,
@@ -513,9 +414,8 @@ ARABIC_NUM_WORDS = {
 
 
 # ============================================================
-# استخراج رقم الجزء
+# استخراج رقم الجزء من اسم الملف
 # ============================================================
-
 def extract_part_number(filename: str) -> int:
 
     if not filename:
@@ -535,7 +435,6 @@ def extract_part_number(filename: str) -> int:
         value = match.group(2)
 
         if value in ARABIC_NUM_WORDS:
-
             return ARABIC_NUM_WORDS[value]
 
         value = value.translate(
@@ -546,10 +445,11 @@ def extract_part_number(filename: str) -> int:
         )
 
         if value.isdigit():
-
             return int(value)
 
-    # محاولة اكتشاف رقم في نهاية اسم الملف
+    # مثال:
+    # book 1.pdf
+    # book-2.epub
     num_match = re.search(
         r"[\s\-_]([0-9٠-٩]+)\s*"
         r"(?:\.pdf|\.epub|\.zip|\.rar|\.7z)?$",
@@ -567,26 +467,15 @@ def extract_part_number(filename: str) -> int:
         )
 
         if value.isdigit():
-
             return int(value)
 
     return 9999
 
 
 # ============================================================
-# عميل Pyrogram
-#
-# مهم:
-# لا يوجد PYROGRAM_SESSION_STRING
-#
-# يتم تسجيل الدخول مباشرة باستخدام:
-# API_ID
-# API_HASH
-# BOT TOKEN
+# Pyrogram
 # ============================================================
-
 pyro_client = None
-
 pyro_lock = asyncio.Lock()
 
 
@@ -597,12 +486,26 @@ def create_pyrogram_client():
     if pyro_client is not None:
         return pyro_client
 
+    if not API_ID:
+        raise RuntimeError(
+            "API_ID غير موجود في Railway Variables."
+        )
+
+    if not API_HASH:
+        raise RuntimeError(
+            "API_HASH غير موجود في Railway Variables."
+        )
+
+    if not TOKEN:
+        raise RuntimeError(
+            "TOKEN غير موجود في Railway Variables."
+        )
+
     pyro_client = Client(
         "reading_library_bot",
         api_id=API_ID,
         api_hash=API_HASH,
         bot_token=TOKEN,
-        workdir=DATA_DIR,
     )
 
     return pyro_client
@@ -610,21 +513,23 @@ def create_pyrogram_client():
 
 # ============================================================
 # استخراج معلومات الملف فقط
-#
-# Document فقط
-#
-# لا صور
-# لا فيديو
-# لا صوت
-# لا روابط
-# لا نصوص
 # ============================================================
-
 def get_document_info(message):
 
     if not message:
         return None
 
+    # ========================================================
+    # مهم:
+    # Document فقط
+    #
+    # لا صور
+    # لا فيديو
+    # لا صوت
+    # لا Voice
+    # لا روابط
+    # لا نص
+    # ========================================================
     if not message.document:
         return None
 
@@ -643,30 +548,18 @@ def get_document_info(message):
 
 
 # ============================================================
-# البحث المباشر في القناة
-#
-# لا توجد أرشفة.
-#
-# لا يتم تخزين الكتب.
-#
-# لا يتم تنزيل الملفات.
-#
-# يتم قراءة سجل القناة وقت الطلب فقط.
+# البحث في ملفات القناة
 # ============================================================
-
 async def search_channel_files(query: str):
 
     client = create_pyrogram_client()
 
-    normalized_query = normalize_arabic(
-        query
-    )
+    normalized_query = normalize_arabic(query)
 
     if not normalized_query:
         return []
 
     results = []
-
     seen_names = set()
 
     async with pyro_lock:
@@ -674,25 +567,30 @@ async def search_channel_files(query: str):
         try:
 
             if not client.is_connected:
-
                 await client.start()
 
             print(
                 f"[SEARCH] Searching channel for: {query}"
             )
 
+            print(
+                f"[SEARCH] Channel: {CHANNEL_ID}"
+            )
+
+            # =================================================
+            # البحث مباشرة في سجل القناة.
+            #
+            # لا يتم إنشاء أرشيف.
+            # لا يتم تخزين أسماء الكتب.
+            # لا يتم تنزيل الملفات.
+            # =================================================
             async for message in client.get_chat_history(
                 CHANNEL_ID
             ):
 
-                # --------------------------------------------
-                # لا نهتم إلا بالـ Documents
-                # --------------------------------------------
+                info = get_document_info(message)
 
-                info = get_document_info(
-                    message
-                )
-
+                # تجاهل كل شيء ليس Document
                 if not info:
                     continue
 
@@ -705,41 +603,35 @@ async def search_channel_files(query: str):
                 if not normalized_name:
                     continue
 
-                # --------------------------------------------
                 # البحث في اسم الملف فقط
-                # --------------------------------------------
-
                 if normalized_query not in normalized_name:
                     continue
 
-                # --------------------------------------------
-                # منع تكرار نفس اسم الملف
+                # =================================================
+                # منع تكرار نفس اسم الملف.
                 #
-                # إذا كان نفس الاسم موجوداً أكثر من مرة،
-                # نحتفظ بنتيجة واحدة فقط.
+                # إذا كان:
+                # كتاب.pdf
+                # كتاب.pdf
                 #
-                # الأجزاء المختلفة تبقى نتائج مختلفة لأن
-                # اسمها مختلف.
-                # --------------------------------------------
-
+                # يتم أخذ واحد فقط.
+                #
+                # أما:
+                # كتاب الجزء 1.pdf
+                # كتاب الجزء 2.pdf
+                #
+                # فهي ملفات مختلفة.
+                # =================================================
                 if normalized_name in seen_names:
                     continue
 
-                seen_names.add(
-                    normalized_name
-                )
+                seen_names.add(normalized_name)
 
-                results.append(
-                    info
-                )
+                results.append(info)
 
-                # حماية من إرسال عدد هائل من النتائج
+                # حماية من إرسال عدد ضخم جداً
                 if len(results) >= 30:
                     break
-
-            print(
-                f"[SEARCH] Found {len(results)} files."
-            )
 
         except FloodWait as e:
 
@@ -748,9 +640,10 @@ async def search_channel_files(query: str):
                 f"waiting {e.value} seconds."
             )
 
-            await asyncio.sleep(
-                e.value
-            )
+            await asyncio.sleep(e.value)
+
+            # إعادة البحث بعد الانتظار
+            return await search_channel_files(query)
 
         except Exception as e:
 
@@ -762,13 +655,16 @@ async def search_channel_files(query: str):
 
             raise
 
+    print(
+        f"[SEARCH] Found {len(results)} matching files."
+    )
+
     return results
 
 
 # ============================================================
 # البحث وإرسال الكتاب
 # ============================================================
-
 async def search_and_forward(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
@@ -781,9 +677,7 @@ async def search_and_forward(
         return
 
     user_id = update.effective_user.id
-
     chat_type = update.effective_chat.type
-
     text = update.message.text.strip()
 
     if not text:
@@ -792,10 +686,10 @@ async def search_and_forward(
     if text.startswith("/"):
         return
 
-    # ========================================================
-    # المحادثة الخاصة
-    # ========================================================
 
+    # ========================================================
+    # الاستخدام الخاص
+    # ========================================================
     if chat_type == "private":
 
         if user_id not in ADMIN_IDS:
@@ -810,32 +704,27 @@ async def search_and_forward(
 
         clean_query = text
 
-    # ========================================================
-    # المجموعة
-    # ========================================================
 
-    elif chat_type in (
-        "group",
-        "supergroup",
-    ):
+    # ========================================================
+    # الاستخدام داخل المجموعة
+    # ========================================================
+    elif chat_type in ("group", "supergroup"):
 
         if not await is_allowed_group(
             update,
             context,
         ):
-
             return
 
+        # هل الرسالة Reply على البوت؟
         is_reply_to_bot = (
-
             update.message.reply_to_message
-
             and update.message.reply_to_message.from_user
-
             and update.message.reply_to_message.from_user.id
             == context.bot.id
         )
 
+        # هل يوجد mention للبوت؟
         mention_pattern = (
             rf"@{re.escape(BOT_USERNAME)}"
         )
@@ -848,11 +737,13 @@ async def search_and_forward(
             )
         )
 
+        # لا نتعامل مع الرسالة إلا إذا:
+        # Reply للبوت
+        # أو Mention للبوت
         if not (
             is_reply_to_bot
             or has_mention
         ):
-
             return
 
         clean_query = re.sub(
@@ -863,26 +754,27 @@ async def search_and_forward(
         ).strip()
 
     else:
-
         return
+
 
     # ========================================================
     # تنظيف اسم الكتاب
     # ========================================================
-
     clean_query = clean_search_query(
         clean_query
     )
 
     if not clean_query:
-
         clean_query = text
 
     normalized_query = normalize_arabic(
         clean_query
     )
 
-    if not normalized_query:
+    if (
+        not normalized_query
+        or len(normalized_query) < 2
+    ):
 
         if chat_type == "private":
 
@@ -892,20 +784,10 @@ async def search_and_forward(
 
         return
 
-    if len(normalized_query) < 2:
-
-        if chat_type == "private":
-
-            await update.message.reply_text(
-                "⚠️ يرجى كتابة اسم كتاب أو كلمة بحث أطول."
-            )
-
-        return
 
     # ========================================================
-    # رسالة حالة البحث
+    # رسالة الحالة
     # ========================================================
-
     status_message = None
 
     if chat_type == "private":
@@ -919,13 +801,12 @@ async def search_and_forward(
             )
 
         except Exception:
+            pass
 
-            status_message = None
 
     # ========================================================
     # البحث
     # ========================================================
-
     try:
 
         results = await search_channel_files(
@@ -945,47 +826,42 @@ async def search_and_forward(
             try:
 
                 await status_message.edit_text(
+                    "❌ حدث خطأ أثناء البحث في القناة.\n\n"
+                    f"`{type(e).__name__}`",
+                    parse_mode="Markdown",
+                )
+
+            except Exception:
+                pass
+
+        else:
+
+            # في المجموعة يظهر الخطأ للمستخدم
+            try:
+
+                await update.message.reply_text(
                     "❌ حدث خطأ أثناء البحث في القناة."
                 )
 
             except Exception:
-
                 pass
 
-        elif chat_type == "private":
-
-            await update.message.reply_text(
-                "❌ حدث خطأ أثناء البحث في القناة."
-            )
-
         return
+
 
     # ========================================================
     # ترتيب النتائج
     # ========================================================
-
     starts_with = []
-
     contains = []
 
     forbidden_prefixes = [
-
-        normalize_arabic(
-            "صور من"
-        ),
-
-        normalize_arabic(
-            "قصص من"
-        ),
-
-        normalize_arabic(
-            "مختصر"
-        ),
-
-        normalize_arabic(
-            "شرح"
-        ),
+        normalize_arabic("صور من"),
+        normalize_arabic("قصص من"),
+        normalize_arabic("مختصر"),
+        normalize_arabic("شرح"),
     ]
+
 
     for item in results:
 
@@ -993,37 +869,28 @@ async def search_and_forward(
             item["file_name"]
         )
 
-        # تجاهل بعض النتائج غير المرغوبة
+        # استبعاد بعض الملفات غير المطلوبة
         if any(
             normalized_name.startswith(prefix)
             for prefix in forbidden_prefixes
         ):
-
             continue
 
         if normalized_name.startswith(
             normalized_query
         ):
-
-            starts_with.append(
-                item
-            )
+            starts_with.append(item)
 
         else:
+            contains.append(item)
 
-            contains.append(
-                item
-            )
 
-    results = (
-        starts_with
-        + contains
-    )
+    results = starts_with + contains
+
 
     # ========================================================
-    # لم نجد شيئاً
+    # لا توجد نتائج
     # ========================================================
-
     if not results:
 
         if status_message:
@@ -1031,29 +898,28 @@ async def search_and_forward(
             try:
 
                 await status_message.edit_text(
-                    f"❌ لم يتم العثور على ملف يطابق:\n"
+                    "❌ لم يتم العثور على ملف يطابق:\n"
                     f"`{clean_query}`",
                     parse_mode="Markdown",
                 )
 
             except Exception:
-
                 pass
 
         elif chat_type == "private":
 
             await update.message.reply_text(
-                f"❌ لم يتم العثور على ملف يطابق:\n"
+                "❌ لم يتم العثور على ملف يطابق:\n"
                 f"`{clean_query}`",
                 parse_mode="Markdown",
             )
 
         return
 
+
     # ========================================================
     # ترتيب الأجزاء
     # ========================================================
-
     results.sort(
         key=lambda item: (
             item["part"],
@@ -1061,27 +927,22 @@ async def search_and_forward(
         )
     )
 
-    # ========================================================
-    # إذا كانت هناك أجزاء:
-    # أرسل الأجزاء.
+
+    # إذا كانت هناك أجزاء واضحة
+    # نرسلها جميعاً.
     #
-    # إذا لم تكن هناك أجزاء:
-    # أرسل أفضل نتيجة واحدة.
-    # ========================================================
-
+    # وإذا لم توجد أجزاء:
+    # نرسل أفضل نتيجة فقط.
     part_results = [
-
         item
         for item in results
         if item["part"] != 9999
-
     ]
+
 
     if part_results:
 
-        results_to_forward = (
-            part_results
-        )
+        results_to_forward = part_results
 
     else:
 
@@ -1089,22 +950,24 @@ async def search_and_forward(
             results[0]
         ]
 
-    # ========================================================
-    # إرسال الملفات
-    #
-    # مهم جداً:
-    # لا يتم تنزيل الملف.
-    #
-    # Telegram يقوم بتحويل الرسالة الموجودة
-    # في القناة مباشرة إلى المجموعة.
-    # ========================================================
 
+    # ========================================================
+    # تحويل الملفات
+    # ========================================================
     sent_count = 0
 
     for item in results_to_forward:
 
         try:
 
+            # =================================================
+            # مهم جداً:
+            #
+            # لا يتم تنزيل الملف.
+            #
+            # يتم تحويل رسالة الملف مباشرة من القناة
+            # إلى المجموعة/المحادثة.
+            # =================================================
             await context.bot.forward_message(
                 chat_id=update.effective_chat.id,
                 from_chat_id=CHANNEL_ID,
@@ -1113,9 +976,7 @@ async def search_and_forward(
 
             sent_count += 1
 
-            await asyncio.sleep(
-                0.5
-            )
+            await asyncio.sleep(0.5)
 
         except Exception as e:
 
@@ -1125,10 +986,10 @@ async def search_and_forward(
                 f"{type(e).__name__}: {e}"
             )
 
-    # ========================================================
-    # تحديث رسالة الحالة
-    # ========================================================
 
+    # ========================================================
+    # تحديث رسالة البحث
+    # ========================================================
     if status_message:
 
         try:
@@ -1144,30 +1005,24 @@ async def search_and_forward(
 
                 await status_message.edit_text(
                     "❌ تم العثور على الملف، "
-                    "لكن تعذر تحويله إلى المحادثة."
+                    "لكن تعذر تحويله."
                 )
 
         except Exception:
-
             pass
 
 
 # ============================================================
 # /start
 # ============================================================
-
 async def start(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
     user_id = update.effective_user.id
-
     chat_type = update.effective_chat.type
 
-    # ========================================================
-    # المجموعة
-    # ========================================================
 
     if chat_type in (
         "group",
@@ -1178,12 +1033,8 @@ async def start(
             update,
             context,
         ):
-
             return
 
-    # ========================================================
-    # الخاص
-    # ========================================================
 
     if chat_type == "private":
 
@@ -1202,21 +1053,18 @@ async def start(
                 disable_web_page_preview=True,
             )
 
-    # ========================================================
-    # المجموعة
-    # ========================================================
-
     else:
 
         await update.message.reply_text(
-            f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
+            f"أهلاً بكم في مجموعة "
+            f"مجتمع القراءة! 📚\n\n"
 
             f"للبحث عن أي كتاب، يمكنك:\n"
 
             f"1️⃣ الإشارة للبوت: "
             f"`@{BOT_USERNAME} اسم الكتاب`\n"
 
-            f"2️⃣ أو عمل Reply على رسالة للبوت "
+            f"2️⃣ أو عمل Reply على أي رسالة للبوت "
             f"وكتابة اسم الكتاب مباشرة.",
             parse_mode="Markdown",
         )
@@ -1225,19 +1073,14 @@ async def start(
 # ============================================================
 # /help
 # ============================================================
-
 async def help_command(
     update: Update,
     context: ContextTypes.DEFAULT_TYPE,
 ):
 
     user_id = update.effective_user.id
-
     chat_type = update.effective_chat.type
 
-    # ========================================================
-    # المجموعة
-    # ========================================================
 
     if chat_type in (
         "group",
@@ -1248,27 +1091,26 @@ async def help_command(
             update,
             context,
         ):
-
             return
 
         await update.message.reply_text(
-            f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
+            f"أهلاً بكم في مجموعة "
+            f"مجتمع القراءة! 📚\n\n"
 
             f"للبحث عن أي كتاب، يمكنك:\n"
 
             f"1️⃣ الإشارة للبوت: "
             f"`@{BOT_USERNAME} اسم الكتاب`\n"
 
-            f"2️⃣ أو عمل Reply على رسالة للبوت "
+            f"2️⃣ أو عمل Reply على أي رسالة للبوت "
             f"وكتابة اسم الكتاب مباشرة.",
             parse_mode="Markdown",
         )
 
-    # ========================================================
-    # الخاص
-    # ========================================================
+        return
 
-    elif chat_type == "private":
+
+    if chat_type == "private":
 
         if user_id in ADMIN_IDS:
 
@@ -1289,66 +1131,51 @@ async def help_command(
 # ============================================================
 # تشغيل Pyrogram عند بدء البوت
 # ============================================================
+async def post_init(application):
 
-async def post_init(
-    application,
-):
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "Starting Reading Library Bot..."
-    )
-
-    print(
-        "Connecting to Telegram with Pyrogram..."
-    )
+    print("========================================")
+    print("Starting Reading Library Bot...")
+    print("========================================")
 
     try:
 
         client = create_pyrogram_client()
 
         if not client.is_connected:
-
             await client.start()
 
-        me = await client.get_me()
-
-        print(
-            f"Pyrogram connected successfully."
-        )
-
-        print(
-            f"Bot ID: {me.id}"
-        )
-
-        print(
-            f"Bot username: @{me.username}"
-        )
-
-        # ----------------------------------------------------
-        # التأكد من الوصول إلى القناة
-        # ----------------------------------------------------
-
+        # =====================================================
+        # التحقق من القناة باستخدام username
+        # وليس الرقم القديم.
+        # =====================================================
         chat = await client.get_chat(
             CHANNEL_ID
         )
 
         print(
-            f"Library channel connected: {chat.title}"
+            "Pyrogram connected successfully."
         )
 
         print(
-            f"Channel ID: {CHANNEL_ID}"
+            f"Channel title: {chat.title}"
+        )
+
+        print(
+            f"Channel username: "
+            f"@{chat.username}"
+            if chat.username
+            else "Channel has no username."
+        )
+
+        print(
+            f"Channel ID: {chat.id}"
+        )
+
+        print(
+            "Ready to search channel documents."
         )
 
     except Exception as e:
-
-        print(
-            "========================================"
-        )
 
         print(
             "[Pyrogram Startup Error]"
@@ -1359,39 +1186,17 @@ async def post_init(
             str(e),
         )
 
-        print(
-            "========================================"
-        )
-
-        # لا نوقف Bot API هنا.
-        # إذا كان هناك خطأ في Pyrogram سيظهر في Logs
-        # ونستطيع إصلاحه دون أن يكون الخطأ مخفياً.
-
-    print(
-        "========================================"
-    )
-
-    print(
-        "Bot initialization completed."
-    )
-
-    print(
-        "========================================"
-    )
+    print("========================================")
 
 
 # ============================================================
 # إيقاف Pyrogram
 # ============================================================
-
-async def post_shutdown(
-    application,
-):
+async def post_shutdown(application):
 
     global pyro_client
 
     if pyro_client is None:
-
         return
 
     try:
@@ -1414,56 +1219,41 @@ async def post_shutdown(
 
 
 # ============================================================
-# تشغيل البرنامج
+# Main
 # ============================================================
-
 def main():
 
-    print(
-        "========================================"
-    )
-
-    print(
-        "Reading Library Bot"
-    )
-
-    print(
-        "Starting..."
-    )
-
-    print(
-        "========================================"
-    )
-
-    # إنشاء قاعدة بيانات المجموعات فقط
     init_db()
 
-    # --------------------------------------------------------
-    # التأكد من وجود التوكن داخل الكود
-    # --------------------------------------------------------
-
+    # ========================================================
+    # التحقق من المتطلبات
+    # ========================================================
     if not TOKEN:
 
         raise RuntimeError(
-            "Bot TOKEN is empty."
+            "TOKEN غير موجود.\n"
+            "أضف توكن البوت الحالي إلى Railway "
+            "Variable باسم TOKEN."
         )
 
     if not API_ID:
 
         raise RuntimeError(
-            "API_ID is empty."
+            "API_ID غير موجود.\n"
+            "أضف API_ID إلى Railway Variables."
         )
 
     if not API_HASH:
 
         raise RuntimeError(
-            "API_HASH is empty."
+            "API_HASH غير موجود.\n"
+            "أضف API_HASH إلى Railway Variables."
         )
 
-    # --------------------------------------------------------
-    # إنشاء تطبيق Telegram Bot API
-    # --------------------------------------------------------
 
+    # ========================================================
+    # إنشاء البوت
+    # ========================================================
     application = (
         ApplicationBuilder()
         .token(TOKEN)
@@ -1472,16 +1262,17 @@ def main():
         .build()
     )
 
-    # --------------------------------------------------------
-    # الأوامر
-    # --------------------------------------------------------
 
+    # ========================================================
+    # Commands
+    # ========================================================
     application.add_handler(
         CommandHandler(
             "start",
             start,
         )
     )
+
 
     application.add_handler(
         CommandHandler(
@@ -1490,10 +1281,10 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # عند إضافة البوت إلى مجموعة
-    # --------------------------------------------------------
 
+    # ========================================================
+    # عند إضافة البوت إلى مجموعة
+    # ========================================================
     application.add_handler(
         MessageHandler(
             filters.StatusUpdate.NEW_CHAT_MEMBERS,
@@ -1501,10 +1292,10 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # عند خروج البوت من المجموعة
-    # --------------------------------------------------------
 
+    # ========================================================
+    # عند مغادرة البوت
+    # ========================================================
     application.add_handler(
         MessageHandler(
             filters.StatusUpdate.LEFT_CHAT_MEMBER,
@@ -1512,72 +1303,37 @@ def main():
         )
     )
 
-    # --------------------------------------------------------
-    # الرسائل النصية فقط
-    #
-    # ملاحظة:
-    # هذا الجزء لا يجعل البوت يتعامل مع ملفات المستخدمين.
-    # نستخدم النص فقط كـ "طلب بحث".
-    #
-    # أما الملفات نفسها في القناة فلا يتم التعامل معها
-    # إلا إذا كانت Document.
-    # --------------------------------------------------------
 
+    # ========================================================
+    # البحث في الرسائل النصية فقط
+    #
+    # النص هنا هو "طلب البحث".
+    #
+    # أما المصدر الذي نبحث فيه فهو Documents فقط.
+    # ========================================================
     application.add_handler(
         MessageHandler(
             filters.TEXT
             & ~filters.COMMAND
-            & filters.ChatType.GROUPS,
+            & (
+                filters.ChatType.PRIVATE
+                | filters.ChatType.GROUPS
+                | filters.ChatType.SUPERGROUP
+            ),
             search_and_forward,
         )
     )
 
-    # --------------------------------------------------------
-    # الخاص للمشرف
-    # --------------------------------------------------------
-
-    application.add_handler(
-        MessageHandler(
-            filters.TEXT
-            & ~filters.COMMAND
-            & filters.ChatType.PRIVATE,
-            search_and_forward,
-        )
-    )
 
     print(
-        "البوت جاهز ويعمل..."
+        "البوت جاهز ويعمل مع المشرفين المعتمدين..."
     )
 
-    print(
-        "لا توجد أرشفة للكتب."
-    )
-
-    print(
-        "البحث يتم مباشرة في سجل القناة."
-    )
-
-    print(
-        "التعامل مع الكتب يقتصر على Documents."
-    )
-
-    print(
-        "========================================"
-    )
-
-    # --------------------------------------------------------
-    # تشغيل البوت
-    # --------------------------------------------------------
-
-    application.run_polling(
-        drop_pending_updates=False
-    )
+    application.run_polling()
 
 
 # ============================================================
-# Main
+# Start
 # ============================================================
-
 if __name__ == "__main__":
-
     main()
