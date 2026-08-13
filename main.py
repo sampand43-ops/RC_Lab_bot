@@ -10,6 +10,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+from pyrogram import Client
 
 # مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
@@ -17,6 +18,11 @@ if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
+
+# بيانات Pyrogram للأرشفة التاريخية (لجلب الملفات القديمة)
+API_ID = 34123643
+API_HASH = "12dccc6e1dce1c82853587ba04e9694d"
+TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 
 # معرف قناتك الثابت
 CHANNEL_ID = -1004395670008
@@ -52,12 +58,13 @@ ADMIN_HELP_TEXT = (
     "📌 *دليل استخدام البوت وتقسيم الصلاحيات*\n\n"
     "━━━━━━ 👑 *صلاحيات المشرف* ━━━━━━\n\n"
     "• *تفعيل المجموعات:* يمكنك إضافة البوت لأي مجموعة جديدة لتفعيلها تلقائياً واستخدامها من قِبل الأعضاء.\n\n"
+    "• *الأرشفة الشاملة (الجديدة):* أرسل الأمر `/sync` في الخاصة لجلب وأرشفة **جميع الملفات السابقة** الموجودة في القناة دفعة واحدة.\n\n"
     "• *البحث الحر في الخاص:* يمكنك البحث واستخراج أي كتاب مباشرة من محادثة البوت الخاصة دون أي قيود.\n\n"
-    "• *الأرشفة الآلية:* بمجرد رفع أي ملف في القناة المربوطة، يتم حفظه وتكشيفه بداخل قاعدة البيانات فوراً.\n\n"
+    "• *الأرشفة الآلية:* بمجرد رفع أي ملف جديد في القناة المربوطة، يتم حفظه وتكشيفه بداخل قاعدة البيانات فوراً.\n\n"
     "━━━━━━ 👥 *صلاحيات وإرشادات الأعضاء* ━━━━━━\n\n"
     "• *الاستخدام المقيّد:* يقتصر استخدام الأعضاء للبوت على المجموعات المعتمدة التي قمت بتفعيلها فقط.\n\n"
     "• *طرق البحث المتاحة:* يمكن للعضو البحث داخل المجموعة عن طريق:\n"
-    "  1️⃣ الإشارة للبوت: @RCGivvvv_bot اسم الكتاب\n"
+    "  1️⃣ الإشارة للبوت: `@RCGivvvv_bot اسم الكتاب`\n"
     "  2️⃣ أو عمل رد (Reply) على أي رسالة للبوت بكتابة اسم الكتاب.\n\n"
     "• *المنع التلقائي:* لا يمكن للأعضاء استخدام البوت في المحادثات الخاصة أو إضافته لمجموعات خارجية، وسيقوم البوت باعتذار ومغادرة تلقائية."
 )
@@ -116,7 +123,8 @@ async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not chat or chat.type not in ['group', 'supergroup']:
         return
-user_id = update.message.from_user.id if update.message and update.message.from_user else None
+
+    user_id = update.message.from_user.id if update.message and update.message.from_user else None
 
     for member in update.message.new_chat_members:
         if member.id == context.bot.id:
@@ -160,6 +168,41 @@ async def on_bot_left_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.commit()
             conn.close()
 
+# --- دالة مسح وأرشفة الملفات السابقة في القناة ---
+async def sync_channel_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id not in ADMIN_IDS:
+        return
+
+    status_msg = await update.message.reply_text("🚀 جاري بدء سحب وأرشفة جميع الملفات السابقة من القناة... يرجى الانتظار.")
+    
+    try:
+        count = 0
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # استخدام Pyrogram لجلب سجل القناة بالكامل بالطريقة المدعومة للبوتات المشرفة
+        async with Client("archive_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=TOKEN) as app:
+            async for message in app.get_chat_history(CHANNEL_ID):
+                document = message.document or message.video or message.audio
+                if document:
+                    book_name = document.file_name or message.caption or f"Book_{message.id}"
+                    msg_id = message.id
+                    try:
+                        cursor.execute(
+                            "INSERT INTO archive (book_name, msg_id) VALUES (?, ?)",
+                            (book_name, msg_id)
+                        )
+                        count += 1
+                    except sqlite3.IntegrityError:
+                        pass
+                        
+        conn.commit()
+        conn.close()
+        await status_msg.edit_text(f"✅ تمت أرشفة الملفات السابقة بنجاح!\nتم إضافة `{count}` ملفاً جديداً إلى قاعدة البيانات.")
+    except Exception as e:
+        await status_msg.edit_text(f"❌ حدث خطأ أثناء الأرشفة السابقة:\n`{e}`", parse_mode="Markdown")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
@@ -184,7 +227,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
             f"للبحث عن أي كتاب، يمكنك:\n"
-            f"1️⃣ إشارة للبوت: @{BOT_USERNAME} اسم الكتاب\n"
+            f"1️⃣ إشارة للبوت: `@{BOT_USERNAME} اسم الكتاب`\n"
             f"2️⃣ أو عمل (رد/Reply) على أي رسالة للبوت وكتابة اسم الكتاب مباشرة.",
             parse_mode="Markdown"
         )
@@ -199,7 +242,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(
             f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
             f"للبحث عن أي كتاب، يمكنك:\n"
-            f"1️⃣ إشارة للبوت: @{BOT_USERNAME} اسم الكتاب\n"
+            f"1️⃣ إشارة للبوت: `@{BOT_USERNAME} اسم الكتاب`\n"
             f"2️⃣ أو عمل (رد/Reply) على أي رسالة للبوت وكتابة اسم الكتاب مباشرة.",
             parse_mode="Markdown"
         )
@@ -215,6 +258,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 parse_mode="Markdown", 
                 disable_web_page_preview=True
             )
+
 async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post
     if message:
@@ -337,7 +381,8 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             
     if not clean_query:
         clean_query = text
-norm_query = normalize_arabic(clean_query)
+
+    norm_query = normalize_arabic(clean_query)
 
     if not norm_query or len(norm_query) < 2:
         if chat_type == 'private':
@@ -391,11 +436,11 @@ norm_query = normalize_arabic(clean_query)
 def main():
     init_db()
     
-    TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
     application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("sync", sync_channel_history))  # أمر أرشفة الملفات السابقة للمشرفين
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
     application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
@@ -404,5 +449,6 @@ def main():
     print("البوت جاهز ويعمل مع المشرفين المعتمدين...")
     application.run_polling()
 
-if name == "main":
+if __name__ == "__main__":
     main()
+
