@@ -46,7 +46,7 @@ PYROGRAM_SESSION_STRING = os.getenv(
 
 # Bot Token
 TOKEN = os.getenv(
-    "BOT_TOKEN",
+    "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8",
     ""
 )
 
