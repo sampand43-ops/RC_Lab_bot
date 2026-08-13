@@ -1,4 +1,5 @@
 import os
+import json
 import sqlite3
 import re
 import asyncio
@@ -10,7 +11,6 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from pyrogram import Client
 
 # مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
@@ -19,15 +19,12 @@ if not os.path.exists(DATA_DIR):
 
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
-# بيانات Pyrogram للأرشفة التاريخية (لجلب الملفات القديمة)
-API_ID = 34123643
-API_HASH = "12dccc6e1dce1c82853587ba04e9694d"
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 
-# معرف قناتك الثابت
+# معرف قناتك الثابت (يُستخدم كافتراضي عند عدم تحديد مصدر آخر)
 CHANNEL_ID = -1004395670008
 
-# قائمة مشرفي البوت المصرح لهم حصراً بإضافته للمجموعات
+# قائمة مشرفي البوت المصرح لهم حصراً بإضافته للمجموعات وبالأرشفة اليدوية
 ADMIN_IDS = [7898871921, 1937491557]
 
 # معرف البوت وبيانات المجموعة الرئيسية
@@ -58,9 +55,9 @@ ADMIN_HELP_TEXT = (
     "📌 *دليل استخدام البوت وتقسيم الصلاحيات*\n\n"
     "━━━━━━ 👑 *صلاحيات المشرف* ━━━━━━\n\n"
     "• *تفعيل المجموعات:* يمكنك إضافة البوت لأي مجموعة جديدة لتفعيلها تلقائياً واستخدامها من قِبل الأعضاء.\n\n"
-    "• *الأرشفة الشاملة (الجديدة):* أرسل الأمر `/sync` في الخاصة لجلب وأرشفة **جميع الملفات السابقة** الموجودة في القناة دفعة واحدة.\n\n"
+    "• *الأرشفة التاريخية (JSON):* صدّر سجل القناة أو الكروب من Telegram Desktop (Export chat history → JSON)، ثم أرسل ملف `result.json` للبوت في الخاص، مع كتابة معرّف المحادثة (chat_id) كتعليق على الملف. سيقوم البوت بأرشفة كل الكتب الموجودة فيه دفعة واحدة، حتى القديمة منها.\n\n"
+    "• *الأرشفة الآلية:* بمجرد رفع أي ملف جديد في القناة أو أي كروب معتمد، يتم حفظه وفهرسته في قاعدة البيانات فوراً.\n\n"
     "• *البحث الحر في الخاص:* يمكنك البحث واستخراج أي كتاب مباشرة من محادثة البوت الخاصة دون أي قيود.\n\n"
-    "• *الأرشفة الآلية:* بمجرد رفع أي ملف جديد في القناة المربوطة، يتم حفظه وتكشيفه بداخل قاعدة البيانات فوراً.\n\n"
     "━━━━━━ 👥 *صلاحيات وإرشادات الأعضاء* ━━━━━━\n\n"
     "• *الاستخدام المقيّد:* يقتصر استخدام الأعضاء للبوت على المجموعات المعتمدة التي قمت بتفعيلها فقط.\n\n"
     "• *طرق البحث المتاحة:* يمكن للعضو البحث داخل المجموعة عن طريق:\n"
@@ -69,6 +66,7 @@ ADMIN_HELP_TEXT = (
     "• *المنع التلقائي:* لا يمكن للأعضاء استخدام البوت في المحادثات الخاصة أو إضافته لمجموعات خارجية، وسيقوم البوت باعتذار ومغادرة تلقائية."
 )
 
+
 def init_db():
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -76,7 +74,9 @@ def init_db():
         CREATE TABLE IF NOT EXISTS archive (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             book_name TEXT,
-            msg_id INTEGER UNIQUE
+            msg_id INTEGER,
+            source_chat_id INTEGER DEFAULT -1004395670008,
+            UNIQUE(msg_id, source_chat_id)
         )
     """)
     cursor.execute("""
@@ -88,6 +88,21 @@ def init_db():
     conn.commit()
     conn.close()
 
+
+def migrate_db():
+    """يضيف عمود source_chat_id إذا كانت قاعدة البيانات من نسخة قديمة لا تحتويه"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("PRAGMA table_info(archive)")
+    columns = [col[1] for col in cursor.fetchall()]
+    if "source_chat_id" not in columns:
+        cursor.execute(
+            f"ALTER TABLE archive ADD COLUMN source_chat_id INTEGER DEFAULT {CHANNEL_ID}"
+        )
+        conn.commit()
+    conn.close()
+
+
 def is_group_approved(chat_id: int) -> bool:
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -95,6 +110,7 @@ def is_group_approved(chat_id: int) -> bool:
     row = cursor.fetchone()
     conn.close()
     return bool(row)
+
 
 async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat = update.effective_chat
@@ -119,6 +135,7 @@ async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             return False
     return True
 
+
 async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if not chat or chat.type not in ['group', 'supergroup']:
@@ -134,7 +151,7 @@ async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 cursor.execute("INSERT OR REPLACE INTO allowed_groups (chat_id, added_by) VALUES (?, ?)", (chat.id, user_id))
                 conn.commit()
                 conn.close()
-                
+
                 try:
                     await context.bot.send_message(
                         chat_id=chat.id,
@@ -158,6 +175,7 @@ async def on_added_to_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     except Exception:
                         pass
 
+
 async def on_bot_left_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message and update.message.left_chat_member:
         if update.message.left_chat_member.id == context.bot.id:
@@ -168,40 +186,123 @@ async def on_bot_left_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.commit()
             conn.close()
 
-# --- دالة مسح وأرشفة الملفات السابقة في القناة ---
-async def sync_channel_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    if user_id not in ADMIN_IDS:
+
+# --- أرشفة تلقائية لأي ملف جديد يُرفع في القناة أو أي كروب معتمد ---
+async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message = update.channel_post or update.message
+    if not message:
         return
 
-    status_msg = await update.message.reply_text("🚀 جاري بدء سحب وأرشفة جميع الملفات السابقة من القناة... يرجى الانتظار.")
-    
+    chat = update.effective_chat
+    if chat is None:
+        return
+
+    # اسمح فقط بالقناة الرئيسية أو الكروبات المعتمدة مسبقاً
+    if chat.id != CHANNEL_ID and not is_group_approved(chat.id):
+        return
+
+    document = message.document or message.video or message.audio
+    if not document:
+        return
+
+    book_name = document.file_name or message.caption or f"Book_{message.message_id}"
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
     try:
+        cursor.execute(
+            "INSERT INTO archive (book_name, msg_id, source_chat_id) VALUES (?, ?, ?)",
+            (book_name, message.message_id, chat.id)
+        )
+        conn.commit()
+    except sqlite3.IntegrityError:
+        pass
+    finally:
+        conn.close()
+
+
+# --- استيراد أرشيف تاريخي من ملف result.json المُصدَّر عبر Telegram Desktop ---
+async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
+
+    if chat_type != 'private' or user_id not in ADMIN_IDS:
+        return
+
+    document = update.message.document
+    if not document or not document.file_name.endswith('.json'):
+        return
+
+    # حدد مصدر الرسائل عبر التعليق (caption) المرفق مع الملف، وإلا استخدم القناة كافتراضي
+    caption = update.message.caption
+    try:
+        source_chat_id = int(caption.strip()) if caption else CHANNEL_ID
+    except ValueError:
+        source_chat_id = CHANNEL_ID
+
+    status_msg = await update.message.reply_text(
+        f"🚀 جاري تحليل ملف التصدير وأرشفة الملفات (المصدر: `{source_chat_id}`)...",
+        parse_mode="Markdown"
+    )
+
+    try:
+        file = await context.bot.get_file(document.file_id)
+        json_path = os.path.join(DATA_DIR, "temp_export.json")
+        await file.download_to_drive(json_path)
+
+        with open(json_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+
+        messages = data.get("messages", [])
         count = 0
+
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        
-        # استخدام Pyrogram لجلب سجل القناة بالكامل بالطريقة المدعومة للبوتات المشرفة
-        async with Client("archive_bot_session", api_id=API_ID, api_hash=API_HASH, bot_token=TOKEN) as app:
-            async for message in app.get_chat_history(CHANNEL_ID):
-                document = message.document or message.video or message.audio
-                if document:
-                    book_name = document.file_name or message.caption or f"Book_{message.id}"
-                    msg_id = message.id
-                    try:
-                        cursor.execute(
-                            "INSERT INTO archive (book_name, msg_id) VALUES (?, ?)",
-                            (book_name, msg_id)
-                        )
-                        count += 1
-                    except sqlite3.IntegrityError:
-                        pass
-                        
+
+        for msg in messages:
+            # نتجاهل أي رسالة لا تحتوي ملفاً مرفقاً
+            if not msg.get("file") and not msg.get("media_type"):
+                continue
+
+            msg_id = msg.get("id")
+            if msg_id is None:
+                continue
+
+            book_name = msg.get("file_name")
+
+            if not book_name:
+                text_field = msg.get("text")
+                if isinstance(text_field, list):
+                    book_name = "".join(
+                        part if isinstance(part, str) else part.get("text", "")
+                        for part in text_field
+                    ).strip()
+                elif isinstance(text_field, str):
+                    book_name = text_field.strip()
+
+            if not book_name:
+                book_name = f"Book_{msg_id}"
+
+            try:
+                cursor.execute(
+                    "INSERT INTO archive (book_name, msg_id, source_chat_id) VALUES (?, ?, ?)",
+                    (book_name, msg_id, source_chat_id)
+                )
+                count += 1
+            except sqlite3.IntegrityError:
+                pass
+
         conn.commit()
         conn.close()
-        await status_msg.edit_text(f"✅ تمت أرشفة الملفات السابقة بنجاح!\nتم إضافة `{count}` ملفاً جديداً إلى قاعدة البيانات.")
+        os.remove(json_path)
+
+        await status_msg.edit_text(
+            f"✅ تمت الأرشفة بنجاح!\nتم إضافة `{count}` ملفاً جديداً إلى قاعدة البيانات."
+        )
+
     except Exception as e:
-        await status_msg.edit_text(f"❌ حدث خطأ أثناء الأرشفة السابقة:\n`{e}`", parse_mode="Markdown")
+        await status_msg.edit_text(f"❌ حدث خطأ أثناء المعالجة:\n`{e}`", parse_mode="Markdown")
+
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -219,8 +320,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await update.message.reply_text(
-                RESTRICTED_TEXT, 
-                parse_mode="Markdown", 
+                RESTRICTED_TEXT,
+                parse_mode="Markdown",
                 disable_web_page_preview=True
             )
     else:
@@ -231,6 +332,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"2️⃣ أو عمل (رد/Reply) على أي رسالة للبوت وكتابة اسم الكتاب مباشرة.",
             parse_mode="Markdown"
         )
+
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -254,32 +356,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         else:
             await update.message.reply_text(
-                RESTRICTED_TEXT, 
-                parse_mode="Markdown", 
+                RESTRICTED_TEXT,
+                parse_mode="Markdown",
                 disable_web_page_preview=True
             )
 
-async def handle_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.channel_post
-    if message:
-        msg_id = message.message_id
-        document = message.document or message.video or message.audio
-        
-        if document:
-            book_name = document.file_name or message.caption or "Unknown_Book"
-            
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            try:
-                cursor.execute(
-                    "INSERT INTO archive (book_name, msg_id) VALUES (?, ?)",
-                    (book_name, msg_id)
-                )
-                conn.commit()
-            except sqlite3.IntegrityError:
-                pass
-            finally:
-                conn.close()
 
 ARABIC_NUM_WORDS = {
     'الأول': 1, 'اول': 1, '1': 1,
@@ -294,6 +375,7 @@ ARABIC_NUM_WORDS = {
     'العاشر': 10, 'عاشر': 10, '10': 10,
 }
 
+
 def extract_part_number(filename):
     match = re.search(r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
     if match:
@@ -303,14 +385,15 @@ def extract_part_number(filename):
         val_en = val.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val_en.isdigit():
             return int(val_en)
-            
+
     num_match = re.search(r'[\s\-_]([0-9٠-٩]+|\d+)\s*(?:\.pdf|\.epub|\.zip)?$', filename)
     if num_match:
         val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val.isdigit():
             return int(val)
-            
+
     return 9999
+
 
 def normalize_arabic(text):
     if not text:
@@ -324,6 +407,7 @@ def normalize_arabic(text):
     text = text.replace('_', ' ')
     text = re.sub(r'\s+', ' ', text)
     return text.strip().lower()
+
 
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
@@ -339,8 +423,8 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if chat_type == 'private':
         if user_id not in ADMIN_IDS:
             await update.message.reply_text(
-                RESTRICTED_TEXT, 
-                parse_mode="Markdown", 
+                RESTRICTED_TEXT,
+                parse_mode="Markdown",
                 disable_web_page_preview=True
             )
             return
@@ -351,11 +435,11 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         is_reply_to_bot = (
-            update.message.reply_to_message 
-            and update.message.reply_to_message.from_user 
+            update.message.reply_to_message
+            and update.message.reply_to_message.from_user
             and update.message.reply_to_message.from_user.id == context.bot.id
         )
-        
+
         mention_pattern = rf'@{re.escape(BOT_USERNAME)}'
         has_mention = bool(re.search(mention_pattern, text, re.IGNORECASE))
 
@@ -369,16 +453,16 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     phrases_to_remove = [
         "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
-        "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب", 
+        "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب",
         "اريد", "أريد", "كتاب", "رواية"
     ]
     phrases_to_remove = sorted(phrases_to_remove, key=len, reverse=True)
-    
+
     for phrase in phrases_to_remove:
         if clean_query.startswith(phrase):
             clean_query = clean_query[len(phrase):].strip()
             break
-            
+
     if not clean_query:
         clean_query = text
 
@@ -391,39 +475,39 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT book_name, msg_id FROM archive GROUP BY msg_id")
+    cursor.execute("SELECT book_name, msg_id, source_chat_id FROM archive GROUP BY msg_id, source_chat_id")
     all_records = cursor.fetchall()
     conn.close()
-    
+
     results = []
-    
-    for book_name, msg_id in all_records:
+
+    for book_name, msg_id, source_chat_id in all_records:
         norm_name = normalize_arabic(book_name)
         if norm_name.startswith(norm_query):
-            results.append((book_name, msg_id))
-            
+            results.append((book_name, msg_id, source_chat_id))
+
     if not results:
         forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
         norm_forbidden = [normalize_arabic(p) for p in forbidden_prefixes]
-        
-        for book_name, msg_id in all_records:
+
+        for book_name, msg_id, source_chat_id in all_records:
             norm_name = normalize_arabic(book_name)
             if norm_query in norm_name:
                 if not any(norm_name.startswith(p) for p in norm_forbidden):
-                    results.append((book_name, msg_id))
-    
+                    results.append((book_name, msg_id, source_chat_id))
+
     if results:
         sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
         valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
-        
+
         if not valid_books:
             valid_books = [sorted_results[0]]
 
-        for book_name, msg_id in valid_books:
+        for book_name, msg_id, source_chat_id in valid_books:
             try:
                 await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
-                    from_chat_id=CHANNEL_ID,
+                    from_chat_id=source_chat_id,
                     message_id=msg_id
                 )
                 await asyncio.sleep(0.5)
@@ -433,22 +517,39 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if chat_type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
 
+
 def main():
     init_db()
-    
+    migrate_db()
+
     application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("sync", sync_channel_history))  # أمر أرشفة الملفات السابقة للمشرفين
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
-    application.add_handler(MessageHandler(filters.ChatType.CHANNEL & (filters.Document.ALL | filters.AUDIO | filters.VIDEO), handle_channel_post))
-    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS | filters.ChatType.SUPERGROUP), search_and_forward))
+
+    # أرشفة تلقائية من القناة أو أي كروب معتمد
+    application.add_handler(MessageHandler(
+        (filters.ChatType.CHANNEL | filters.ChatType.GROUPS) &
+        (filters.Document.ALL | filters.AUDIO | filters.VIDEO),
+        handle_new_upload
+    ))
+
+    # استيراد أرشيف تاريخي (JSON) من الخاص فقط
+    application.add_handler(MessageHandler(
+        filters.ChatType.PRIVATE & filters.Document.FileExtension("json"),
+        import_json_archive
+    ))
+
+    application.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & (filters.ChatType.PRIVATE | filters.ChatType.GROUPS),
+        search_and_forward
+    ))
 
     print("البوت جاهز ويعمل مع المشرفين المعتمدين...")
     application.run_polling()
 
+
 if __name__ == "__main__":
     main()
-
