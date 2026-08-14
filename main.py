@@ -5,11 +5,12 @@ import re
 import asyncio
 import difflib
 from collections import defaultdict
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -76,6 +77,7 @@ ADMIN_HELP_TEXT = (
     "• *تفعيل المجموعات:* يمكنك إضافة البوت لأي مجموعة جديدة لتفعيلها تلقائياً واستخدامها من قِبل الأعضاء.\n\n"
     "• *الأرشفة التاريخية (JSON):* صدّر سجل القناة أو الكروب من Telegram Desktop (Export chat history → JSON)، ثم أرسل ملف `result.json` للبوت في الخاص، مع كتابة معرّف المحادثة (chat_id) كتعليق على الملف. سيقوم البوت بأرشفة كل الكتب الموجودة فيه دفعة واحدة، حتى القديمة منها.\n\n"
     "• *الأرشفة الآلية:* بمجرد رفع أي ملف جديد في القناة أو أي كروب معتمد، يتم حفظه وفهرسته في قاعدة البيانات فوراً.\n\n"
+    "• *لوحة تحكم الأرشيف:* أرسل الأمر `/panel` للحصول على أزرار تحكم تفاعلية (إحصائيات الأرشيف، حذف آخر عدد من الكتب، أو حذف الأرشيف بالكامل).\n\n"
     "• *البحث الحر في الخاص:* يمكنك البحث واستخراج أي كتاب مباشرة من محادثة البوت الخاصة دون أي قيود.\n\n"
     "━━━━━━ 👥 *صلاحيات وإرشادات الأعضاء* ━━━━━━\n\n"
     "• *الاستخدام المقيّد:* يقتصر استخدام الأعضاء للبوت على المجموعات المعتمدة التي قمت بتفعيلها فقط.\n\n"
@@ -569,6 +571,105 @@ def find_book_matches(norm_query, all_records):
     return fuzzy_matches
 
 
+def build_admin_panel_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("📊 إحصائيات الأرشيف", callback_data="admin_stats")],
+        [InlineKeyboardButton("🔢 حذف آخر عدد من الكتب", callback_data="admin_delete_count")],
+        [InlineKeyboardButton("🗑️ حذف كامل الأرشيف", callback_data="admin_clear_all")],
+    ])
+
+
+async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعرض لوحة تحكم تفاعلية للأدمن لإدارة الأرشيف (إحصائيات، حذف)"""
+    user_id = update.effective_user.id
+    if update.effective_chat.type != 'private' or user_id not in ADMIN_IDS:
+        return
+
+    await update.message.reply_text(
+        "⚙️ *لوحة تحكم الأرشيف*\n\nاختر أحد الخيارات:",
+        parse_mode="Markdown",
+        reply_markup=build_admin_panel_keyboard()
+    )
+
+
+async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يستقبل ضغطات أزرار لوحة تحكم الأدمن"""
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if user_id not in ADMIN_IDS:
+        await query.answer("عذراً، هذه اللوحة مخصصة للمشرفين فقط.", show_alert=True)
+        return
+
+    await query.answer()
+    data = query.data
+
+    if data == "admin_stats":
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM archive")
+        total = cursor.fetchone()[0]
+        cursor.execute(
+            "SELECT source_chat_id, COUNT(*) FROM archive GROUP BY source_chat_id ORDER BY COUNT(*) DESC"
+        )
+        by_source = cursor.fetchall()
+        conn.close()
+
+        text = f"📊 *إحصائيات الأرشيف*\n\nإجمالي الكتب المؤرشفة: `{total}`\n\n*حسب المصدر:*\n"
+        for chat_id, count in by_source:
+            label = "📚 القناة الرئيسية" if chat_id == CHANNEL_ID else f"👥 كروب ({chat_id})"
+            text += f"• {label}: `{count}`\n"
+
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
+
+    elif data == "admin_clear_all":
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("✅ نعم، احذف كل شيء", callback_data="admin_clear_all_confirm")],
+            [InlineKeyboardButton("❌ إلغاء", callback_data="admin_back")],
+        ])
+        await query.edit_message_text(
+            "⚠️ *تأكيد الحذف الكامل*\n\n"
+            "سيتم حذف *كامل فهرس الأرشيف المحلي* نهائياً (أسماء الكتب وأرقام رسائلها فقط).\n"
+            "لن يتأثر أي ملف فعلي داخل القناة أو الكروبات — الملفات تبقى كما هي.\n\n"
+            "هذا الإجراء *لا يمكن التراجع عنه*. هل أنت متأكد؟",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+    elif data == "admin_clear_all_confirm":
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM archive")
+        conn.commit()
+        conn.close()
+
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
+        await query.edit_message_text(
+            "✅ تم حذف كامل فهرس الأرشيف بنجاح.",
+            reply_markup=keyboard
+        )
+
+    elif data == "admin_delete_count":
+        context.user_data['awaiting_delete_count'] = True
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data="admin_back")]])
+        await query.edit_message_text(
+            "🔢 أرسل الآن *عدد* الكتب التي تريد حذفها.\n\n"
+            "سيتم حذف آخر عدد تمت أرشفته (الأحدث إضافةً للأرشيف).\n"
+            "مثال: أرسل `50` لحذف آخر 50 كتاباً أُضيفت.",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
+    elif data == "admin_back":
+        context.user_data.pop('awaiting_delete_count', None)
+        await query.edit_message_text(
+            "⚙️ *لوحة تحكم الأرشيف*\n\nاختر أحد الخيارات:",
+            parse_mode="Markdown",
+            reply_markup=build_admin_panel_keyboard()
+        )
+
+
 async def live_search_channel(query, limit=80):
     """
     بحث حي مباشر داخل القناة عبر حساب المستخدم (Userbot)، يُستخدم فقط كخطة احتياطية
@@ -614,6 +715,34 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
     text = update.message.text.strip()
+
+    # معالجة إدخال عدد الحذف إن كان الأدمن قد اختار "حذف آخر عدد من الكتب" من لوحة التحكم
+    if chat_type == 'private' and user_id in ADMIN_IDS and context.user_data.get('awaiting_delete_count'):
+        context.user_data.pop('awaiting_delete_count', None)
+
+        if text.isdigit() and int(text) > 0:
+            n = int(text)
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM archive ORDER BY id DESC LIMIT ?", (n,))
+            ids_to_delete = [row[0] for row in cursor.fetchall()]
+            if ids_to_delete:
+                cursor.executemany(
+                    "DELETE FROM archive WHERE id = ?",
+                    [(i,) for i in ids_to_delete]
+                )
+                conn.commit()
+            conn.close()
+
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_back")]])
+            await update.message.reply_text(
+                f"✅ تم حذف `{len(ids_to_delete)}` كتاباً (آخر ما تمت أرشفته).",
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
+        else:
+            await update.message.reply_text("⚠️ الرجاء إرسال رقم صحيح فقط (مثال: 50).")
+        return
 
     if text.startswith('/'):
         return
@@ -796,6 +925,8 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("panel", admin_panel))
+    application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^admin_"))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
 
