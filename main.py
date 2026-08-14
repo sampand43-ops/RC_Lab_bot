@@ -3,6 +3,8 @@ import json
 import sqlite3
 import re
 import asyncio
+import difflib
+from collections import defaultdict
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -247,29 +249,29 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     try:
         file = await context.bot.get_file(document.file_id)
-        json_path = os.path.join(DATA_DIR, "temp_export.json")
+        json_path = os.path.join(DATA_DIR, f"temp_export_{update.message.message_id}.json")
         await file.download_to_drive(json_path)
 
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         messages = data.get("messages", [])
-        count = 0
+        total_msgs = len(messages)
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
+        # تسريع الكتابة على القرص أثناء الاستيراد الضخم
+        cursor.execute("PRAGMA synchronous = OFF")
+        cursor.execute("PRAGMA journal_mode = MEMORY")
 
-        for msg in messages:
-            # نتجاهل أي رسالة لا تحتوي ملفاً مرفقاً
-            if not msg.get("file") and not msg.get("media_type"):
-                continue
+        batch = []
+        BATCH_SIZE = 2000
+        inserted_total = 0
+        processed = 0
+        last_reported_percent = -1
 
-            msg_id = msg.get("id")
-            if msg_id is None:
-                continue
-
+        def extract_book_name(msg):
             book_name = msg.get("file_name")
-
             if not book_name:
                 text_field = msg.get("text")
                 if isinstance(text_field, list):
@@ -279,25 +281,57 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
                     ).strip()
                 elif isinstance(text_field, str):
                     book_name = text_field.strip()
+            return book_name
 
-            if not book_name:
-                book_name = f"Book_{msg_id}"
+        for msg in messages:
+            processed += 1
 
-            try:
-                cursor.execute(
-                    "INSERT INTO archive (book_name, msg_id, source_chat_id) VALUES (?, ?, ?)",
-                    (book_name, msg_id, source_chat_id)
+            # نتجاهل أي رسالة لا تحتوي ملفاً مرفقاً
+            if msg.get("file") or msg.get("media_type"):
+                msg_id = msg.get("id")
+                if msg_id is not None:
+                    book_name = extract_book_name(msg) or f"Book_{msg_id}"
+                    batch.append((book_name, msg_id, source_chat_id))
+
+            if len(batch) >= BATCH_SIZE:
+                cursor.executemany(
+                    "INSERT OR IGNORE INTO archive (book_name, msg_id, source_chat_id) VALUES (?, ?, ?)",
+                    batch
                 )
-                count += 1
-            except sqlite3.IntegrityError:
-                pass
+                inserted_total += cursor.rowcount if cursor.rowcount != -1 else len(batch)
+                conn.commit()
+                batch.clear()
 
-        conn.commit()
+            # تحديث تقرير التقدّم كل 10% لتفادي إغراق تيليجرام بالتعديلات
+            percent = int((processed / total_msgs) * 100) if total_msgs else 100
+            if percent >= last_reported_percent + 10:
+                last_reported_percent = percent
+                try:
+                    await status_msg.edit_text(
+                        f"⏳ جاري الأرشفة... {percent}% ({processed}/{total_msgs})"
+                    )
+                except Exception:
+                    pass  # تجاهل أخطاء تعديل الرسالة (مثل: نفس المحتوى)
+
+        if batch:
+            cursor.executemany(
+                "INSERT OR IGNORE INTO archive (book_name, msg_id, source_chat_id) VALUES (?, ?, ?)",
+                batch
+            )
+            conn.commit()
+
+        # عدد السجلات الفعلي المضاف = الفرق قبل وبعد (أدق من الاعتماد على rowcount مع OR IGNORE)
+        cursor.execute("SELECT COUNT(*) FROM archive WHERE source_chat_id = ?", (source_chat_id,))
+        final_count = cursor.fetchone()[0]
+
         conn.close()
         os.remove(json_path)
 
         await status_msg.edit_text(
-            f"✅ تمت الأرشفة بنجاح!\nتم إضافة `{count}` ملفاً جديداً إلى قاعدة البيانات."
+            f"✅ تمت الأرشفة بنجاح!\n"
+            f"عدد الرسائل المفحوصة في هذا الملف: `{total_msgs}`\n"
+            f"إجمالي الكتب المؤرشفة الآن لهذا المصدر: `{final_count}`\n\n"
+            f"💡 إذا كان لديك أجزاء أخرى من نفس المكتبة، أرسلها الآن واحداً تلو الآخر."
         )
 
     except Exception as e:
@@ -376,8 +410,15 @@ ARABIC_NUM_WORDS = {
 }
 
 
+PART_PATTERN = re.compile(
+    r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)',
+    re.IGNORECASE
+)
+TRAILING_NUM_PATTERN = re.compile(r'[\s\-_]([0-9٠-٩]+)\s*(?:\.pdf|\.epub|\.zip)?$')
+
+
 def extract_part_number(filename):
-    match = re.search(r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)', filename, re.IGNORECASE)
+    match = PART_PATTERN.search(filename)
     if match:
         val = match.group(2)
         if val in ARABIC_NUM_WORDS:
@@ -386,13 +427,21 @@ def extract_part_number(filename):
         if val_en.isdigit():
             return int(val_en)
 
-    num_match = re.search(r'[\s\-_]([0-9٠-٩]+|\d+)\s*(?:\.pdf|\.epub|\.zip)?$', filename)
+    num_match = TRAILING_NUM_PATTERN.search(filename)
     if num_match:
         val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val.isdigit():
             return int(val)
 
-    return 9999
+    return None  # لا يوجد رقم جزء/مجلد في الاسم
+
+
+def strip_part_pattern(filename):
+    """يزيل إشارة الجزء/المجلد من الاسم للحصول على 'الاسم الأساسي' للسلسلة"""
+    stripped = PART_PATTERN.sub('', filename)
+    stripped = TRAILING_NUM_PATTERN.sub('', stripped)
+    stripped = re.sub(r'\.(pdf|epub|zip|mobi|docx?)$', '', stripped, flags=re.IGNORECASE)
+    return stripped.strip()
 
 
 def normalize_arabic(text):
@@ -407,6 +456,52 @@ def normalize_arabic(text):
     text = text.replace('_', ' ')
     text = re.sub(r'\s+', ' ', text)
     return text.strip().lower()
+
+
+# أنماط استثناء طلب "كل كتب فلان" — تُرجع اسم الكاتب المستخرج إن وُجدت المطابقة
+AUTHOR_REQUEST_PATTERNS = [
+    re.compile(r'^(?:اريد|أريد)\s+(?:كل|جميع)\s+كتب\s+(.+)$'),
+    re.compile(r'^(?:كل|جميع)\s+كتب\s+(.+)$'),
+]
+
+FORBIDDEN_PREFIXES = ["صور من", "قصص من", "مختصر", "شرح"]
+
+
+def dedupe_exact(records):
+    """يحذف أي تكرار حرفي لنفس اسم الكتاب (نفس المحتوى بالضبط)، يبقي أول نسخة فقط"""
+    seen = set()
+    deduped = []
+    for book_name, msg_id, source_chat_id in records:
+        key = normalize_arabic(book_name)
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append((book_name, msg_id, source_chat_id))
+    return deduped
+
+
+def group_into_series(records):
+    """يجمع السجلات حسب 'الاسم الأساسي' (بدون رقم الجزء) لتمييز أجزاء نفس الكتاب"""
+    groups = defaultdict(list)
+    for book_name, msg_id, source_chat_id in records:
+        base_key = normalize_arabic(strip_part_pattern(book_name))
+        groups[base_key].append((book_name, msg_id, source_chat_id))
+    return groups
+
+
+async def send_book_results(update, context, valid_books):
+    """يرسل قائمة الكتب (msg_id + source_chat_id) بدون أي وصف أو تسمية توضيحية"""
+    for book_name, msg_id, source_chat_id in valid_books:
+        try:
+            await context.bot.copy_message(
+                chat_id=update.effective_chat.id,
+                from_chat_id=source_chat_id,
+                message_id=msg_id,
+                caption=""  # إزالة أي وصف/تسمية توضيحية مرفقة بالملف الأصلي
+            )
+            await asyncio.sleep(0.4)
+        except Exception:
+            pass
 
 
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -451,22 +546,35 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         return
 
-    phrases_to_remove = [
-        "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
-        "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب",
-        "اريد", "أريد", "كتاب", "رواية"
-    ]
-    phrases_to_remove = sorted(phrases_to_remove, key=len, reverse=True)
-
-    for phrase in phrases_to_remove:
-        if clean_query.startswith(phrase):
-            clean_query = clean_query[len(phrase):].strip()
+    # --- الكشف عن استثناء "أريد كل/جميع كتب [الكاتب]" أولاً ---
+    is_author_request = False
+    author_query = None
+    for pattern in AUTHOR_REQUEST_PATTERNS:
+        m = pattern.match(clean_query.strip())
+        if m:
+            is_author_request = True
+            author_query = m.group(1).strip()
             break
 
-    if not clean_query:
-        clean_query = text
+    if is_author_request and author_query:
+        norm_query = normalize_arabic(author_query)
+    else:
+        phrases_to_remove = [
+            "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
+            "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب",
+            "اريد", "أريد", "كتاب", "رواية"
+        ]
+        phrases_to_remove = sorted(phrases_to_remove, key=len, reverse=True)
 
-    norm_query = normalize_arabic(clean_query)
+        for phrase in phrases_to_remove:
+            if clean_query.startswith(phrase):
+                clean_query = clean_query[len(phrase):].strip()
+                break
+
+        if not clean_query:
+            clean_query = text
+
+        norm_query = normalize_arabic(clean_query)
 
     if not norm_query or len(norm_query) < 2:
         if chat_type == 'private':
@@ -479,43 +587,75 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     all_records = cursor.fetchall()
     conn.close()
 
-    results = []
+    norm_forbidden = [normalize_arabic(p) for p in FORBIDDEN_PREFIXES]
 
+    # ============= وضع "كل كتب الكاتب" =============
+    if is_author_request:
+        results = []
+        for book_name, msg_id, source_chat_id in all_records:
+            norm_name = normalize_arabic(book_name)
+            if norm_query in norm_name and not any(norm_name.startswith(p) for p in norm_forbidden):
+                results.append((book_name, msg_id, source_chat_id))
+
+        if not results:
+            if chat_type == 'private':
+                await update.message.reply_text(f"❌ لم يتم العثور على أي كتب تطابق ('{author_query}') في الأرشيف.")
+            return
+
+        deduped = dedupe_exact(results)
+        await send_book_results(update, context, deduped)
+        return
+
+    # ============= وضع البحث العادي عن كتاب/سلسلة واحدة =============
+    results = []
     for book_name, msg_id, source_chat_id in all_records:
         norm_name = normalize_arabic(book_name)
         if norm_name.startswith(norm_query):
             results.append((book_name, msg_id, source_chat_id))
 
     if not results:
-        forbidden_prefixes = ["صور من", "قصص من", "مختصر", "شرح"]
-        norm_forbidden = [normalize_arabic(p) for p in forbidden_prefixes]
-
         for book_name, msg_id, source_chat_id in all_records:
             norm_name = normalize_arabic(book_name)
-            if norm_query in norm_name:
-                if not any(norm_name.startswith(p) for p in norm_forbidden):
-                    results.append((book_name, msg_id, source_chat_id))
+            if norm_query in norm_name and not any(norm_name.startswith(p) for p in norm_forbidden):
+                results.append((book_name, msg_id, source_chat_id))
 
-    if results:
-        sorted_results = sorted(results, key=lambda x: extract_part_number(x[0]))
-        valid_books = [item for item in sorted_results if extract_part_number(item[0]) != 9999]
+    # مطابقة تقريبية (تحمّل أخطاء إملائية بسيطة) إذا لم يُعثر على أي نتيجة مباشرة
+    if not results:
+        all_names = [(book_name, msg_id, source_chat_id) for book_name, msg_id, source_chat_id in all_records]
+        norm_name_map = {normalize_arabic(b): (b, m, s) for b, m, s in all_names}
+        close = difflib.get_close_matches(norm_query, list(norm_name_map.keys()), n=5, cutoff=0.6)
+        for key in close:
+            results.append(norm_name_map[key])
 
-        if not valid_books:
-            valid_books = [sorted_results[0]]
-
-        for book_name, msg_id, source_chat_id in valid_books:
-            try:
-                await context.bot.forward_message(
-                    chat_id=update.effective_chat.id,
-                    from_chat_id=source_chat_id,
-                    message_id=msg_id
-                )
-                await asyncio.sleep(0.5)
-            except Exception:
-                pass
-    else:
+    if not results:
         if chat_type == 'private':
             await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
+        return
+
+    # حذف التكرار الحرفي أولاً
+    deduped = dedupe_exact(results)
+
+    # تجميع النتائج حسب السلسلة (الاسم الأساسي بدون رقم الجزء)
+    groups = group_into_series(deduped)
+
+    # نختار المجموعة الأكثر تطابقاً مع طلب المستخدم:
+    # إن كانت كل النتائج تنتمي لنفس السلسلة، نرسلها كاملة (كل الأجزاء).
+    # إن كانت هناك عدة كتب مختلفة مطابقة (بحث عام)، نرسل كل مجموعة على حدة.
+    final_books = []
+    for base_key, items in groups.items():
+        distinct_parts = {extract_part_number(b) for b, _, _ in items if extract_part_number(b) is not None}
+        if len(distinct_parts) >= 2:
+            # سلسلة متعددة الأجزاء: أرسل كل الأجزاء مرتبة
+            sorted_items = sorted(
+                items,
+                key=lambda x: (extract_part_number(x[0]) is None, extract_part_number(x[0]) or 0)
+            )
+            final_books.extend(sorted_items)
+        else:
+            # كتاب واحد فقط لهذه المجموعة: أرسل أول نسخة غير مكررة فقط
+            final_books.append(items[0])
+
+    await send_book_results(update, context, final_books)
 
 
 def main():
