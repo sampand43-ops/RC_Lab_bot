@@ -5,11 +5,12 @@ import re
 import asyncio
 import difflib
 from collections import defaultdict
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes,
 )
@@ -26,7 +27,7 @@ TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 # معرف قناتك الثابت (يُستخدم كافتراضي عند عدم تحديد مصدر آخر)
 CHANNEL_ID = -1004395670008
 
-# قائمة مشرفي البوت المصرح لهم حصراً بإضافته للمجموعات وبالأرشفة اليدوية
+# قائمة مشرفي البوت المصرح لهم حصراً بإضافته للمجموعات وبالأرشفة اليدوية وإدارة اللوحة
 ADMIN_IDS = [7898871921, 1937491557]
 
 # معرف البوت وبيانات المجموعة الرئيسية
@@ -46,26 +47,18 @@ LEAVE_TEXT = (
     f"سأقوم بالمغادرة الآن..."
 )
 
-ADMIN_WELCOME_TEXT = (
-    "أهلاً بك في لوحة تحكم البوت 📚⚙️\n\n"
-    "بصفتك مشرفاً رئيسياً للنظام، تتوفر لك الصلاحيات الكاملة لجميع الخصائص.\n\n"
-    "💡 للحصول على دليل التعليمات وتقسيم الصلاحيات التفصيلي، أرسل الأمر: /help\n\n"
-    "البوت قيد التشغيل وجاهز لخدمتك ✨"
-)
-
 ADMIN_HELP_TEXT = (
     "📌 *دليل استخدام البوت وتقسيم الصلاحيات*\n\n"
     "━━━━━━ 👑 *صلاحيات المشرف* ━━━━━━\n\n"
+    "• *لوحة التحكم والأزرار:* عند إرسال `/start` في الخاص، تظهر لك لوحة تفاعلية لإدارة الأرشيف والإحصائيات.\n\n"
     "• *تفعيل المجموعات:* يمكنك إضافة البوت لأي مجموعة جديدة لتفعيلها تلقائياً واستخدامها من قِبل الأعضاء.\n\n"
-    "• *الأرشفة التاريخية (JSON):* صدّر سجل القناة أو الكروب من Telegram Desktop (Export chat history → JSON)، ثم أرسل ملف `result.json` للبوت في الخاص، مع كتابة معرّف المحادثة (chat_id) كتعليق على الملف. سيقوم البوت بأرشفة كل الكتب الموجودة فيه دفعة واحدة، حتى القديمة منها.\n\n"
+    "• *الأرشفة التاريخية (JSON):* صدّر سجل القناة أو الكروب من Telegram Desktop (Export chat history → JSON)، ثم أرسل ملف `result.json` للبوت في الخاص، مع كتابة معرّف المحادثة (chat_id) كتعليق على الملف. سيقوم البوت بأرشفة كل الكتب الموجودة فيه دفعة واحدة.\n\n"
     "• *الأرشفة الآلية:* بمجرد رفع أي ملف جديد في القناة أو أي كروب معتمد، يتم حفظه وفهرسته في قاعدة البيانات فوراً.\n\n"
-    "• *البحث الحر في الخاص:* يمكنك البحث واستخراج أي كتاب مباشرة من محادثة البوت الخاصة دون أي قيود.\n\n"
     "━━━━━━ 👥 *صلاحيات وإرشادات الأعضاء* ━━━━━━\n\n"
     "• *الاستخدام المقيّد:* يقتصر استخدام الأعضاء للبوت على المجموعات المعتمدة التي قمت بتفعيلها فقط.\n\n"
     "• *طرق البحث المتاحة:* يمكن للعضو البحث داخل المجموعة عن طريق:\n"
     "  1️⃣ الإشارة للبوت: `@RCGivvvv_bot اسم الكتاب`\n"
-    "  2️⃣ أو عمل رد (Reply) على أي رسالة للبوت بكتابة اسم الكتاب.\n\n"
-    "• *المنع التلقائي:* لا يمكن للأعضاء استخدام البوت في المحادثات الخاصة أو إضافته لمجموعات خارجية، وسيقوم البوت باعتذار ومغادرة تلقائية."
+    "  2️⃣ أو عمل رد (Reply) على أي رسالة للبوت بكتابة اسم الكتاب."
 )
 
 
@@ -92,7 +85,6 @@ def init_db():
 
 
 def migrate_db():
-    """يضيف عمود source_chat_id إذا كانت قاعدة البيانات من نسخة قديمة لا تحتويه"""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(archive)")
@@ -199,7 +191,6 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat is None:
         return
 
-    # اسمح فقط بالقناة الرئيسية أو الكروبات المعتمدة مسبقاً
     if chat.id != CHANNEL_ID and not is_group_approved(chat.id):
         return
 
@@ -223,7 +214,7 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
 
-# --- استيراد أرشيف تاريخي من ملف result.json المُصدَّر عبر Telegram Desktop ---
+# --- استيراد أرشيف تاريخي من ملف result.json ---
 async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
@@ -235,7 +226,6 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not document or not document.file_name.endswith('.json'):
         return
 
-    # حدد مصدر الرسائل عبر التعليق (caption) المرفق مع الملف، وإلا استخدم القناة كافتراضي
     caption = update.message.caption
     try:
         source_chat_id = int(caption.strip()) if caption else CHANNEL_ID
@@ -260,13 +250,11 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        # تسريع الكتابة على القرص أثناء الاستيراد الضخم
         cursor.execute("PRAGMA synchronous = OFF")
         cursor.execute("PRAGMA journal_mode = MEMORY")
 
         batch = []
         BATCH_SIZE = 2000
-        inserted_total = 0
         processed = 0
         last_reported_percent = -1
 
@@ -285,8 +273,6 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         for msg in messages:
             processed += 1
-
-            # نتجاهل أي رسالة لا تحتوي ملفاً مرفقاً
             if msg.get("file") or msg.get("media_type"):
                 msg_id = msg.get("id")
                 if msg_id is not None:
@@ -298,11 +284,9 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
                     "INSERT OR IGNORE INTO archive (book_name, msg_id, source_chat_id) VALUES (?, ?, ?)",
                     batch
                 )
-                inserted_total += cursor.rowcount if cursor.rowcount != -1 else len(batch)
                 conn.commit()
                 batch.clear()
 
-            # تحديث تقرير التقدّم كل 10% لتفادي إغراق تيليجرام بالتعديلات
             percent = int((processed / total_msgs) * 100) if total_msgs else 100
             if percent >= last_reported_percent + 10:
                 last_reported_percent = percent
@@ -311,7 +295,7 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
                         f"⏳ جاري الأرشفة... {percent}% ({processed}/{total_msgs})"
                     )
                 except Exception:
-                    pass  # تجاهل أخطاء تعديل الرسالة (مثل: نفس المحتوى)
+                    pass
 
         if batch:
             cursor.executemany(
@@ -320,7 +304,6 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
             )
             conn.commit()
 
-        # عدد السجلات الفعلي المضاف = الفرق قبل وبعد (أدق من الاعتماد على rowcount مع OR IGNORE)
         cursor.execute("SELECT COUNT(*) FROM archive WHERE source_chat_id = ?", (source_chat_id,))
         final_count = cursor.fetchone()[0]
 
@@ -330,14 +313,14 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
         await status_msg.edit_text(
             f"✅ تمت الأرشفة بنجاح!\n"
             f"عدد الرسائل المفحوصة في هذا الملف: `{total_msgs}`\n"
-            f"إجمالي الكتب المؤرشفة الآن لهذا المصدر: `{final_count}`\n\n"
-            f"💡 إذا كان لديك أجزاء أخرى من نفس المكتبة، أرسلها الآن واحداً تلو الآخر."
+            f"إجمالي الكتب المؤرشفة الآن لهذا المصدر: `{final_count}`"
         )
 
     except Exception as e:
         await status_msg.edit_text(f"❌ حدث خطأ أثناء المعالجة:\n`{e}`", parse_mode="Markdown")
 
 
+# --- واجهة لوحة تحكم الآدمن مع الأزرار التفاعلية ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
@@ -345,26 +328,137 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_type in ['group', 'supergroup']:
         if not await is_allowed_group(update, context):
             return
-
-    if chat_type == 'private':
-        if user_id in ADMIN_IDS:
-            await update.message.reply_text(
-                ADMIN_WELCOME_TEXT,
-                parse_mode="Markdown"
-            )
-        else:
-            await update.message.reply_text(
-                RESTRICTED_TEXT,
-                parse_mode="Markdown",
-                disable_web_page_preview=True
-            )
-    else:
         await update.message.reply_text(
             f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
             f"للبحث عن أي كتاب، يمكنك:\n"
             f"1️⃣ إشارة للبوت: `@{BOT_USERNAME} اسم الكتاب`\n"
             f"2️⃣ أو عمل (رد/Reply) على أي رسالة للبوت وكتابة اسم الكتاب مباشرة.",
             parse_mode="Markdown"
+        )
+        return
+
+    if chat_type == 'private':
+        if user_id in ADMIN_IDS:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM archive")
+            total_books = cursor.fetchone()[0]
+            cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM allowed_groups")
+            total_groups = cursor.fetchone()[0]
+            conn.close()
+
+            keyboard = [
+                [InlineKeyboardButton("📊 إحصائيات الأرشيف", callback_data="admin_stats")],
+                [InlineKeyboardButton("🗑️ حذف عدد معين من الأرشيف", callback_data="admin_ask_delete_count")],
+                [InlineKeyboardButton("⚠️ حذف كامل الأرشيف (تفريغ القاعدة)", callback_data="admin_confirm_clear")],
+                [InlineKeyboardButton("📌 دليل الاستخدام والمساعدة", callback_data="admin_help")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            welcome_msg = (
+                f"أهلاً بك في لوحة تحكم الآدمن الرئيسية 📚⚙️\n\n"
+                f"• إجمالي الكتب المؤرشفة حالياً: `{total_books}` كتاب\n"
+                f"• المجموعات المعتمدة المفعلة: `{total_groups}` مجموعة\n\n"
+                f"اختر ما تريده من الأزرار أدناه:"
+            )
+            await update.message.reply_text(welcome_msg, parse_mode="Markdown", reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(
+                RESTRICTED_TEXT,
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
+
+
+# --- معالجة الضغط على أزرار لوحة التحكم ---
+async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+
+    if user_id not in ADMIN_IDS:
+        await query.answer("عذراً، هذه الأزرار خاصة بالمشرفين فقط.", show_alert=True)
+        return
+
+    data = query.data
+    await query.answer()
+
+    if data == "admin_stats":
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM archive")
+        total = cursor.fetchone()[0]
+        cursor.execute("SELECT source_chat_id, COUNT(*) FROM archive GROUP BY source_chat_id")
+        sources = cursor.fetchall()
+        conn.close()
+
+        stats_text = f"📊 *إحصائيات قاعدة البيانات الشاملة*\n\n• إجمالي الكتب المؤرشفة: `{total}`\n\n*التوزيع حسب المصدر:* \n"
+        for src, count in sources:
+            stats_text += f"- القناة/المجموعة (`{src}`): `{count}` كتاب\n"
+
+        keyboard = [[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_home")]]
+        await query.edit_message_text(stats_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data == "admin_home":
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM archive")
+        total_books = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(DISTINCT chat_id) FROM allowed_groups")
+        total_groups = cursor.fetchone()[0]
+        conn.close()
+
+        keyboard = [
+            [InlineKeyboardButton("📊 إحصائيات الأرشيف", callback_data="admin_stats")],
+            [InlineKeyboardButton("🗑️ حذف عدد معين من الأرشيف", callback_data="admin_ask_delete_count")],
+            [InlineKeyboardButton("⚠️ حذف كامل الأرشيف (تفريغ القاعدة)", callback_data="admin_confirm_clear")],
+            [InlineKeyboardButton("📌 دليل الاستخدام والمساعدة", callback_data="admin_help")]
+        ]
+        welcome_msg = (
+            f"أهلاً بك في لوحة تحكم الآدمن الرئيسية 📚⚙️\n\n"
+            f"• إجمالي الكتب المؤرشفة حالياً: `{total_books}` كتاب\n"
+            f"• المجموعات المعتمدة المفعلة: `{total_groups}` مجموعة\n\n"
+            f"اختر ما تريده من الأزرار أدناه:"
+        )
+        await query.edit_message_text(welcome_msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data == "admin_help":
+        keyboard = [[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_home")]]
+        await query.edit_message_text(ADMIN_HELP_TEXT, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif data == "admin_ask_delete_count":
+        context.user_data['waiting_for_delete_count'] = True
+        keyboard = [[InlineKeyboardButton("❌ إلغاء", callback_data="admin_home")]]
+        await query.edit_message_text(
+            "🗑️ *حذف عدد معين من الأرشيف*\n\n"
+            "الرجاء كتابة **عدد الكتب** المراد حذفها (مثلاً: `500` أو `1000` من أحدث الكتب المضافة) وإرسالها برقم صحيح في هذه المحادثة.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data == "admin_confirm_clear":
+        keyboard = [
+            [InlineKeyboardButton("✅ نعم، متأكد (احذف الكل)", callback_data="admin_do_clear_all")],
+            [InlineKeyboardButton("❌ تراجع وإلغاء", callback_data="admin_home")]
+        ]
+        await query.edit_message_text(
+            "⚠️ *تحذير خطير جداً!*\n\n"
+            "هل أنت متأكد من رغبتك في تفريغ قاعدة البيانات وحذف **جميع الكتب المؤرشفة بالكامل**؟ لا يمكن التراجع عن هذا الإجراء بعد تنفيذه.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif data == "admin_do_clear_all":
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM archive")
+        conn.commit()
+        conn.close()
+
+        keyboard = [[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_home")]]
+        await query.edit_message_text(
+            "✅ تم تفريغ الأرشيف وحذف كافة السجلات بنجاح تام.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
 
@@ -409,7 +503,6 @@ ARABIC_NUM_WORDS = {
     'العاشر': 10, 'عاشر': 10, '10': 10,
 }
 
-
 PART_PATTERN = re.compile(
     r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)',
     re.IGNORECASE
@@ -433,11 +526,10 @@ def extract_part_number(filename):
         if val.isdigit():
             return int(val)
 
-    return None  # لا يوجد رقم جزء/مجلد في الاسم
+    return None
 
 
 def strip_part_pattern(filename):
-    """يزيل إشارة الجزء/المجلد من الاسم للحصول على 'الاسم الأساسي' للسلسلة"""
     stripped = PART_PATTERN.sub('', filename)
     stripped = TRAILING_NUM_PATTERN.sub('', stripped)
     stripped = re.sub(r'\.(pdf|epub|zip|mobi|docx?)$', '', stripped, flags=re.IGNORECASE)
@@ -445,7 +537,6 @@ def strip_part_pattern(filename):
 
 
 def strip_al(word):
-    """يوحّد الكلمات بإزالة (ال) التعريف من بدايتها، مثل: الشرقاوي -> شرقاوي"""
     if len(word) > 3 and word.startswith('ال'):
         return word[2:]
     return word
@@ -467,11 +558,9 @@ def normalize_arabic(text):
 
 
 def get_words(normalized_text):
-    """يُرجع الكلمات ذات الدلالة فقط (يتجاهل الكلمات القصيرة جداً مثل حروف الجر)"""
     return [w for w in normalized_text.split() if len(w) >= 2]
 
 
-# أنماط استثناء طلب "كل كتب فلان" — تُرجع اسم الكاتب المستخرج إن وُجدت المطابقة
 AUTHOR_REQUEST_PATTERNS = [
     re.compile(r'^(?:اريد|أريد)\s+(?:كل|جميع)\s+كتب\s+(.+)$'),
     re.compile(r'^(?:كل|جميع)\s+كتب\s+(.+)$'),
@@ -481,7 +570,6 @@ FORBIDDEN_PREFIXES = ["صور من", "قصص من", "مختصر", "شرح"]
 
 
 def dedupe_exact(records):
-    """يحذف أي تكرار حرفي لنفس اسم الكتاب (نفس المحتوى بالضبط)، يبقي أول نسخة فقط"""
     seen = set()
     deduped = []
     for book_name, msg_id, source_chat_id in records:
@@ -494,7 +582,6 @@ def dedupe_exact(records):
 
 
 def group_into_series(records):
-    """يجمع السجلات حسب 'الاسم الأساسي' (بدون رقم الجزء) لتمييز أجزاء نفس الكتاب"""
     groups = defaultdict(list)
     for book_name, msg_id, source_chat_id in records:
         base_key = normalize_arabic(strip_part_pattern(book_name))
@@ -503,15 +590,6 @@ def group_into_series(records):
 
 
 def find_book_matches(norm_query, all_records):
-    """
-    بحث دقيق بأولويات صارمة لتفادي إرسال كتب غير مرتبطة بالطلب:
-    1) تطابق تام كامل للاسم (بعد حذف الامتداد ورقم الجزء)
-    2) (فقط للطلبات متعددة الكلمات) الاسم يبدأ بنص الطلب بالكامل
-    3) (فقط للطلبات متعددة الكلمات) كل كلمات الطلب موجودة كاملة داخل اسم الكتاب
-    4) (فقط للطلبات متعددة الكلمات) تطابق تقريبي على مستوى كل كلمة (يسمح بأخطاء إملائية بسيطة)
-    الطلبات المكوّنة من كلمة واحدة فقط تُقبل حصراً عند التطابق التام،
-    لتفادي مشاكل مثل طلب "إدارة" وحده الذي يطابق عشرات العناوين المختلفة.
-    """
     query_words = get_words(norm_query)
 
     base_keys = {}
@@ -519,21 +597,17 @@ def find_book_matches(norm_query, all_records):
         book_name = record[0]
         base_keys[book_name] = normalize_arabic(strip_part_pattern(book_name))
 
-    # 1) تطابق تام (على الاسم بعد حذف الامتداد ورقم الجزء)
     exact = [r for r in all_records if base_keys[r[0]] == norm_query]
     if exact:
         return exact
 
-    # الطلبات المكوّنة من كلمة واحدة فقط تتوقف هنا تماماً (لا مطابقة فضفاضة إطلاقاً)
     if len(query_words) < 2:
         return []
 
-    # 2) الاسم يبدأ بنص الطلب بالكامل
     startswith_matches = [r for r in all_records if base_keys[r[0]].startswith(norm_query)]
     if startswith_matches:
         return startswith_matches
 
-    # 3) كل كلمات الطلب موجودة كاملة (بأي ترتيب) داخل اسم الكتاب
     word_matches = []
     for r in all_records:
         name_words = get_words(base_keys[r[0]])
@@ -542,7 +616,6 @@ def find_book_matches(norm_query, all_records):
     if word_matches:
         return word_matches
 
-    # 4) تطابق تقريبي على مستوى كل كلمة (يتحمل أخطاء إملائية بسيطة) — لكل كلمات الطلب معاً
     fuzzy_matches = []
     for r in all_records:
         name_words = get_words(base_keys[r[0]])
@@ -553,7 +626,6 @@ def find_book_matches(norm_query, all_records):
 
 
 async def send_book_results(update, context, valid_books):
-    """يحوّل قائمة الكتب من القناة مباشرة (يظهر 'محوّلة من القناة' مع الوصف الأصلي كاملاً)"""
     for book_name, msg_id, source_chat_id in valid_books:
         try:
             await context.bot.forward_message(
@@ -576,6 +648,38 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if text.startswith('/'):
         return
+
+    # معالجة إدخال عدد الكتب المراد حذفها من قبل الآدمن
+    if chat_type == 'private' and user_id in ADMIN_IDS:
+        if context.user_data.get('waiting_for_delete_count'):
+            context.user_data['waiting_for_delete_count'] = False
+            try:
+                count_to_delete = int(text)
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                # حذف أحدث عدد تم تحديده بناءً على الـ id الأكبر
+                cursor.execute(
+                    "DELETE FROM archive WHERE id IN (SELECT id FROM archive ORDER BY id DESC LIMIT ?)",
+                    (count_to_delete,)
+                )
+                deleted_rows = cursor.rowcount
+                conn.commit()
+                conn.close()
+
+                keyboard = [[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_home")]]
+                await update.message.reply_text(
+                    f"✅ تم بنجاح حذف آخر `{deleted_rows}` كتاب من الأرشيف.",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            except ValueError:
+                keyboard = [[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_home")]]
+                await update.message.reply_text(
+                    "❌ القيمة المدخلة غير صالحة. يرجى إرسال رقم صحيح (مثال: `100`).",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup(keyboard)
+                )
+            return
 
     if chat_type == 'private':
         if user_id not in ADMIN_IDS:
@@ -608,7 +712,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         return
 
-    # --- الكشف عن استثناء "أريد كل/جميع كتب [الكاتب]" أولاً ---
     is_author_request = False
     author_query = None
     for pattern in AUTHOR_REQUEST_PATTERNS:
@@ -651,13 +754,11 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     norm_forbidden = [normalize_arabic(p) for p in FORBIDDEN_PREFIXES]
 
-    # نستبعد الملفات ذات البادئات غير المرغوبة (صور من، مختصر...) من كل عمليات البحث
     filtered_records = [
         r for r in all_records
         if not any(normalize_arabic(r[0]).startswith(p) for p in norm_forbidden)
     ]
 
-    # ============= وضع "كل كتب الكاتب" =============
     if is_author_request:
         results = [
             r for r in filtered_records
@@ -674,7 +775,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await send_book_results(update, context, deduped)
         return
 
-    # ============= وضع البحث العادي عن كتاب/سلسلة واحدة (بحث دقيق ضد التطابق الفضفاض) =============
     results = find_book_matches(norm_query, filtered_records)
 
     if not results:
@@ -684,27 +784,19 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
         return
 
-    # حذف التكرار الحرفي أولاً
     deduped = dedupe_exact(results)
-
-    # تجميع النتائج حسب السلسلة (الاسم الأساسي بدون رقم الجزء)
     groups = group_into_series(deduped)
 
-    # نختار المجموعة الأكثر تطابقاً مع طلب المستخدم:
-    # إن كانت كل النتائج تنتمي لنفس السلسلة، نرسلها كاملة (كل الأجزاء).
-    # إن كانت هناك عدة كتب مختلفة مطابقة (بحث عام)، نرسل كل مجموعة على حدة.
     final_books = []
     for base_key, items in groups.items():
         distinct_parts = {extract_part_number(b) for b, _, _ in items if extract_part_number(b) is not None}
         if len(distinct_parts) >= 2:
-            # سلسلة متعددة الأجزاء: أرسل كل الأجزاء مرتبة
             sorted_items = sorted(
                 items,
                 key=lambda x: (extract_part_number(x[0]) is None, extract_part_number(x[0]) or 0)
             )
             final_books.extend(sorted_items)
         else:
-            # كتاب واحد فقط لهذه المجموعة: أرسل أول نسخة غير مكررة فقط
             final_books.append(items[0])
 
     await send_book_results(update, context, final_books)
@@ -718,17 +810,16 @@ def main():
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^admin_"))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
 
-    # أرشفة تلقائية من القناة أو أي كروب معتمد
     application.add_handler(MessageHandler(
         (filters.ChatType.CHANNEL | filters.ChatType.GROUPS) &
         (filters.Document.ALL | filters.AUDIO | filters.VIDEO),
         handle_new_upload
     ))
 
-    # استيراد أرشيف تاريخي (JSON) من الخاص فقط
     application.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.Document.FileExtension("json"),
         import_json_archive
@@ -739,9 +830,10 @@ def main():
         search_and_forward
     ))
 
-    print("البوت جاهز ويعمل مع المشرفين المعتمدين...")
+    print("البوت جاهز ويعمل بكفاءة مع لوحة تحكم الآدمن والتفقد التفاعلي...")
     application.run_polling()
 
 
 if __name__ == "__main__":
     main()
+
