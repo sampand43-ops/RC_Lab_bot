@@ -444,6 +444,13 @@ def strip_part_pattern(filename):
     return stripped.strip()
 
 
+def strip_al(word):
+    """يوحّد الكلمات بإزالة (ال) التعريف من بدايتها، مثل: الشرقاوي -> شرقاوي"""
+    if len(word) > 3 and word.startswith('ال'):
+        return word[2:]
+    return word
+
+
 def normalize_arabic(text):
     if not text:
         return ""
@@ -455,7 +462,13 @@ def normalize_arabic(text):
     text = re.sub(r'[^\w\s]', ' ', text)
     text = text.replace('_', ' ')
     text = re.sub(r'\s+', ' ', text)
-    return text.strip().lower()
+    words = [strip_al(w) for w in text.strip().lower().split()]
+    return ' '.join(words)
+
+
+def get_words(normalized_text):
+    """يُرجع الكلمات ذات الدلالة فقط (يتجاهل الكلمات القصيرة جداً مثل حروف الجر)"""
+    return [w for w in normalized_text.split() if len(w) >= 2]
 
 
 # أنماط استثناء طلب "كل كتب فلان" — تُرجع اسم الكاتب المستخرج إن وُجدت المطابقة
@@ -489,15 +502,64 @@ def group_into_series(records):
     return groups
 
 
+def find_book_matches(norm_query, all_records):
+    """
+    بحث دقيق بأولويات صارمة لتفادي إرسال كتب غير مرتبطة بالطلب:
+    1) تطابق تام كامل للاسم (بعد حذف الامتداد ورقم الجزء)
+    2) (فقط للطلبات متعددة الكلمات) الاسم يبدأ بنص الطلب بالكامل
+    3) (فقط للطلبات متعددة الكلمات) كل كلمات الطلب موجودة كاملة داخل اسم الكتاب
+    4) (فقط للطلبات متعددة الكلمات) تطابق تقريبي على مستوى كل كلمة (يسمح بأخطاء إملائية بسيطة)
+    الطلبات المكوّنة من كلمة واحدة فقط تُقبل حصراً عند التطابق التام،
+    لتفادي مشاكل مثل طلب "إدارة" وحده الذي يطابق عشرات العناوين المختلفة.
+    """
+    query_words = get_words(norm_query)
+
+    base_keys = {}
+    for record in all_records:
+        book_name = record[0]
+        base_keys[book_name] = normalize_arabic(strip_part_pattern(book_name))
+
+    # 1) تطابق تام (على الاسم بعد حذف الامتداد ورقم الجزء)
+    exact = [r for r in all_records if base_keys[r[0]] == norm_query]
+    if exact:
+        return exact
+
+    # الطلبات المكوّنة من كلمة واحدة فقط تتوقف هنا تماماً (لا مطابقة فضفاضة إطلاقاً)
+    if len(query_words) < 2:
+        return []
+
+    # 2) الاسم يبدأ بنص الطلب بالكامل
+    startswith_matches = [r for r in all_records if base_keys[r[0]].startswith(norm_query)]
+    if startswith_matches:
+        return startswith_matches
+
+    # 3) كل كلمات الطلب موجودة كاملة (بأي ترتيب) داخل اسم الكتاب
+    word_matches = []
+    for r in all_records:
+        name_words = get_words(base_keys[r[0]])
+        if all(qw in name_words for qw in query_words):
+            word_matches.append(r)
+    if word_matches:
+        return word_matches
+
+    # 4) تطابق تقريبي على مستوى كل كلمة (يتحمل أخطاء إملائية بسيطة) — لكل كلمات الطلب معاً
+    fuzzy_matches = []
+    for r in all_records:
+        name_words = get_words(base_keys[r[0]])
+        if all(difflib.get_close_matches(qw, name_words, n=1, cutoff=0.8) for qw in query_words):
+            fuzzy_matches.append(r)
+
+    return fuzzy_matches
+
+
 async def send_book_results(update, context, valid_books):
-    """يرسل قائمة الكتب (msg_id + source_chat_id) بدون أي وصف أو تسمية توضيحية"""
+    """يحوّل قائمة الكتب من القناة مباشرة (يظهر 'محوّلة من القناة' مع الوصف الأصلي كاملاً)"""
     for book_name, msg_id, source_chat_id in valid_books:
         try:
-            await context.bot.copy_message(
+            await context.bot.forward_message(
                 chat_id=update.effective_chat.id,
                 from_chat_id=source_chat_id,
-                message_id=msg_id,
-                caption=""  # إزالة أي وصف/تسمية توضيحية مرفقة بالملف الأصلي
+                message_id=msg_id
             )
             await asyncio.sleep(0.4)
         except Exception:
@@ -589,47 +651,37 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     norm_forbidden = [normalize_arabic(p) for p in FORBIDDEN_PREFIXES]
 
+    # نستبعد الملفات ذات البادئات غير المرغوبة (صور من، مختصر...) من كل عمليات البحث
+    filtered_records = [
+        r for r in all_records
+        if not any(normalize_arabic(r[0]).startswith(p) for p in norm_forbidden)
+    ]
+
     # ============= وضع "كل كتب الكاتب" =============
     if is_author_request:
-        results = []
-        for book_name, msg_id, source_chat_id in all_records:
-            norm_name = normalize_arabic(book_name)
-            if norm_query in norm_name and not any(norm_name.startswith(p) for p in norm_forbidden):
-                results.append((book_name, msg_id, source_chat_id))
+        results = [
+            r for r in filtered_records
+            if norm_query in normalize_arabic(r[0])
+        ]
 
         if not results:
-            if chat_type == 'private':
-                await update.message.reply_text(f"❌ لم يتم العثور على أي كتب تطابق ('{author_query}') في الأرشيف.")
+            await update.message.reply_text(
+                f"❌ لم يتم العثور على أي كتب باسم الكاتب ('{author_query}') في أرشيف القناة."
+            )
             return
 
         deduped = dedupe_exact(results)
         await send_book_results(update, context, deduped)
         return
 
-    # ============= وضع البحث العادي عن كتاب/سلسلة واحدة =============
-    results = []
-    for book_name, msg_id, source_chat_id in all_records:
-        norm_name = normalize_arabic(book_name)
-        if norm_name.startswith(norm_query):
-            results.append((book_name, msg_id, source_chat_id))
+    # ============= وضع البحث العادي عن كتاب/سلسلة واحدة (بحث دقيق ضد التطابق الفضفاض) =============
+    results = find_book_matches(norm_query, filtered_records)
 
     if not results:
-        for book_name, msg_id, source_chat_id in all_records:
-            norm_name = normalize_arabic(book_name)
-            if norm_query in norm_name and not any(norm_name.startswith(p) for p in norm_forbidden):
-                results.append((book_name, msg_id, source_chat_id))
-
-    # مطابقة تقريبية (تحمّل أخطاء إملائية بسيطة) إذا لم يُعثر على أي نتيجة مباشرة
-    if not results:
-        all_names = [(book_name, msg_id, source_chat_id) for book_name, msg_id, source_chat_id in all_records]
-        norm_name_map = {normalize_arabic(b): (b, m, s) for b, m, s in all_names}
-        close = difflib.get_close_matches(norm_query, list(norm_name_map.keys()), n=5, cutoff=0.6)
-        for key in close:
-            results.append(norm_name_map[key])
-
-    if not results:
-        if chat_type == 'private':
-            await update.message.reply_text(f"❌ عذراً، لم يتم العثور على كتاب يطابق ('{clean_query}') في الأرشيف.")
+        await update.message.reply_text(
+            f"❌ عذراً، الاسم ('{clean_query}') غير موجود في أرشيف القناة.\n"
+            f"تأكد من كتابة اسم الكتاب بشكل أقرب للعنوان الأصلي، أو حاول باسم مختصر أدق."
+        )
         return
 
     # حذف التكرار الحرفي أولاً
