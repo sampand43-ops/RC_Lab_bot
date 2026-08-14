@@ -18,8 +18,6 @@ from telegram.ext import (
 # استيراد أدوات بناء الـ PDF وتنسيق النصوص العربية
 from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
 
 # مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
@@ -240,7 +238,6 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
             data = json.load(f)
 
         messages = data.get("messages", [])
-        total_msgs = len(messages)
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -380,11 +377,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
             pdf_path = os.path.join(DATA_DIR, "books_archive_list.pdf")
             
-            # إعداد ملف الـ PDF باستخدام ReportLab
             c = canvas.Canvas(pdf_path, pagesize=letter)
             width, height = letter
             
-            # رسم رأس الصفحة والعنوان
             c.setFont("Helvetica-Bold", 16)
             c.drawString(50, height - 50, "Reading Community - Books Archive List")
             c.setFont("Helvetica", 10)
@@ -395,9 +390,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             c.setFont("Helvetica", 9)
             
             for idx, (bname,) in enumerate(books, 1):
-                # تنظيف النصوص لتتوافق مع طباعة الـ PDF البسيطة
                 clean_name = f"{idx}. {bname}".replace('\n', ' ')
-                # قص العنوان إذا كان طويلاً جداً لتفادي التداخل
                 if len(clean_name) > 110:
                     clean_name = clean_name[:107] + "..."
                 
@@ -625,8 +618,13 @@ async def send_book_results(update, context, valid_books):
                 message_id=msg_id
             )
             await asyncio.sleep(0.4)
-        except Exception:
-            pass
+        except Exception as e:
+            # إظهار السبب الحقيقي لخطأ إعادة التوجيه للمشرف في الخاص
+            if update.effective_chat.type == 'private' and update.effective_user.id in ADMIN_IDS:
+                await update.message.reply_text(
+                    f"❌ تعذر إرسال الكتاب (`{book_name}`):\nالسبب التقني: `{e}`",
+                    parse_mode="Markdown"
+                )
 
 
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
