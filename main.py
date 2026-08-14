@@ -15,6 +15,12 @@ from telegram.ext import (
     ContextTypes,
 )
 
+# استيراد أدوات بناء الـ PDF وتنسيق النصوص العربية
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
 # مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
@@ -45,15 +51,10 @@ LEAVE_TEXT = (
 ADMIN_HELP_TEXT = (
     "📌 *دليل استخدام البوت وتقسيم الصلاحيات*\n\n"
     "━━━━━━ 👑 *صلاحيات المشرف* ━━━━━━\n\n"
-    "• *لوحة التحكم والأزرار:* عند إرسال `/start` في الخاص، تظهر لك لوحة تفاعلية لإدارة الأرشيف والإحصائيات واستخراج أسماء الكتب.\n\n"
+    "• *لوحة التحكم والأزرار:* عند إرسال `/start` في الخاص، تظهر لك لوحة تفاعلية لإدارة الأرشيف وإحصائيات واستخراج القائمة بصيغة PDF.\n\n"
     "• *تفعيل المجموعات:* يمكنك إضافة البوت لأي مجموعة جديدة لتفعيلها تلقائياً واستخدامها من قِبل الأعضاء.\n\n"
     "• *الأرشفة التاريخية (JSON):* صدّر سجل القناة أو الكروب من Telegram Desktop، ثم أرسل ملف `result.json` للبوت في الخاص.\n\n"
-    "• *الأرشفة الآلية:* بمجرد رفع أي ملف جديد في القناة أو أي كروب معتمد، يتم حفظه وفهرسته في قاعدة البيانات فوراً.\n\n"
-    "━━━━━━ 👥 *صلاحيات وإرشادات الأعضاء* ━━━━━━\n\n"
-    "• *الاستخدام المقيّد:* يقتصر استخدام الأعضاء للبوت على المجموعات المعتمدة التي قمت بتفعيلها فقط.\n\n"
-    "• *طرق البحث المتاحة:* يمكن للعضو البحث داخل المجموعة عن طريق:\n"
-    "  1️⃣ الإشارة للبوت: `@RCGivvvv_bot اسم الكتاب`\n"
-    "  2️⃣ أو عمل رد (Reply) على أي رسالة للبوت بكتابة اسم الكتاب."
+    "• *الأرشفة الآلية:* بمجرد رفع أي ملف جديد في القناة أو أي كروب معتمد، يتم حفظه وفهرسته في قاعدة البيانات فوراً."
 )
 
 
@@ -226,7 +227,7 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
         source_chat_id = CHANNEL_ID
 
     status_msg = await update.message.reply_text(
-        f"🚀 جاري تحليل ملف التصدير وأرشفة الملفات (المصدر: `{source_chat_id}`)...",
+        f"🚀 جاري تحليل ملف التصدير وأرشفة الملفات...",
         parse_mode="Markdown"
     )
 
@@ -248,7 +249,6 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         batch = []
         BATCH_SIZE = 2000
-        processed = 0
 
         def extract_book_name(msg):
             book_name = msg.get("file_name")
@@ -264,7 +264,6 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
             return book_name
 
         for msg in messages:
-            processed += 1
             if msg.get("file") or msg.get("media_type"):
                 msg_id = msg.get("id")
                 if msg_id is not None:
@@ -292,10 +291,7 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
         conn.close()
         os.remove(json_path)
 
-        await status_msg.edit_text(
-            f"✅ تمت الأرشفة بنجاح!\n"
-            f"إجمالي الكتب المؤرشفة الآن لهذا المصدر: `{final_count}`"
-        )
+        await status_msg.edit_text(f"✅ تمت الأرشفة بنجاح! الإجمالي الحالي: `{final_count}`")
 
     except Exception as e:
         await status_msg.edit_text(f"❌ حدث خطأ أثناء المعالجة:\n`{e}`", parse_mode="Markdown")
@@ -304,7 +300,7 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
 def get_admin_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 إحصائيات الأرشيف", callback_data="admin_stats")],
-        [InlineKeyboardButton("📄 استخراج أسماء الكتب (ملف)", callback_data="admin_export_list")],
+        [InlineKeyboardButton("📄 استخراج أسماء الكتب (PDF)", callback_data="admin_export_pdf")],
         [InlineKeyboardButton("🗑️ حذف عدد معين من الأرشيف", callback_data="admin_ask_delete_count")],
         [InlineKeyboardButton("⚠️ حذف كامل الأرشيف (تفريغ القاعدة)", callback_data="admin_confirm_clear")],
         [InlineKeyboardButton("📌 دليل الاستخدام والمساعدة", callback_data="admin_help")]
@@ -320,7 +316,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await update.message.reply_text(
             f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
-            f"للبحث عن أي كتاب، يمكنك الإشارة للبوت `@RDGivvvv_bot` أو الرد على رسائله.",
+            f"للبحث عن أي كتاب، يمكنك الإشارة للبوت `@{BOT_USERNAME}` أو الرد على رسائله.",
             parse_mode="Markdown"
         )
         return
@@ -343,11 +339,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             await update.message.reply_text(welcome_msg, parse_mode="Markdown", reply_markup=get_admin_keyboard())
         else:
-            await update.message.reply_text(
-                RESTRICTED_TEXT,
-                parse_mode="Markdown",
-                disable_web_page_preview=True
-            )
+            await update.message.reply_text(RESTRICTED_TEXT, parse_mode="Markdown", disable_web_page_preview=True)
 
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -377,8 +369,8 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         keyboard = [[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_home")]]
         await query.edit_message_text(stats_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif data == "admin_export_list":
-        status_msg = await query.message.reply_text("⏳ جاري تجهيز ملف أسماء الكتب المؤرشفة...")
+    elif data == "admin_export_pdf":
+        status_msg = await query.message.reply_text("⏳ جاري توليد ملف الـ PDF لجميع أسماء الكتب، قد يستغرق ذلك ثواني...")
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
@@ -386,21 +378,48 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             books = cursor.fetchall()
             conn.close()
 
-            file_path = os.path.join(DATA_DIR, "books_archive_list.txt")
-            with open(file_path, "w", encoding="utf-8") as f:
-                f.write(f"قائمة أسماء الكتب المؤرشفة (الإجمالي: {len(books)} كتاب):\n" + "="*50 + "\n\n")
-                for idx, (bname,) in enumerate(books, 1):
-                    f.write(f"{idx}. {bname}\n")
+            pdf_path = os.path.join(DATA_DIR, "books_archive_list.pdf")
+            
+            # إعداد ملف الـ PDF باستخدام ReportLab
+            c = canvas.Canvas(pdf_path, pagesize=letter)
+            width, height = letter
+            
+            # رسم رأس الصفحة والعنوان
+            c.setFont("Helvetica-Bold", 16)
+            c.drawString(50, height - 50, "Reading Community - Books Archive List")
+            c.setFont("Helvetica", 10)
+            c.drawString(50, height - 70, f"Total Books: {len(books)}")
+            c.line(50, height - 80, width - 50, height - 80)
+            
+            y = height - 100
+            c.setFont("Helvetica", 9)
+            
+            for idx, (bname,) in enumerate(books, 1):
+                # تنظيف النصوص لتتوافق مع طباعة الـ PDF البسيطة
+                clean_name = f"{idx}. {bname}".replace('\n', ' ')
+                # قص العنوان إذا كان طويلاً جداً لتفادي التداخل
+                if len(clean_name) > 110:
+                    clean_name = clean_name[:107] + "..."
+                
+                c.drawString(50, y, clean_name)
+                y -= 18
+                
+                if y < 50:
+                    c.showPage()
+                    c.setFont("Helvetica", 9)
+                    y = height - 50
+                    
+            c.save()
 
             await context.bot.send_document(
                 chat_id=query.message.chat_id,
-                document=file_path,
-                caption=f"📄 قائمة بجميع أسماء الكتب المؤرشفة الحالية (عددها: {len(books)} كتاب)."
+                document=pdf_path,
+                caption=f"📄 ملف PDF يحتوي على قائمة أسماء الكتب المؤرشفة (الإجمالي: {len(books)} كتاب)."
             )
-            os.remove(file_path)
+            os.remove(pdf_path)
             await status_msg.delete()
         except Exception as e:
-            await status_msg.edit_text(f"❌ حدث خطأ أثناء تصدير القائمة: `{e}`", parse_mode="Markdown")
+            await status_msg.edit_text(f"❌ حدث خطأ أثناء إنشاء ملف الـ PDF:\n`{e}`", parse_mode="Markdown")
 
     elif data == "admin_home":
         conn = sqlite3.connect(DB_PATH)
@@ -427,8 +446,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data['waiting_for_delete_count'] = True
         keyboard = [[InlineKeyboardButton("❌ إلغاء", callback_data="admin_home")]]
         await query.edit_message_text(
-            "🗑️ *حذف عدد معين من الأرشيف*\n\n"
-            "الرجاء كتابة **عدد الكتب** المراد حذفها (مثلاً: `500`) وإرسالها برقم صحيح في هذه المحادثة.",
+            "🗑️ *حذف عدد معين من الأرشيف*\n\nالرجاء كتابة **عدد الكتب** المراد حذفها (مثلاً: `500`) كرسالة نصية.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -439,8 +457,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             [InlineKeyboardButton("❌ تراجع وإلغاء", callback_data="admin_home")]
         ]
         await query.edit_message_text(
-            "⚠️ *تحذير خطير جداً!*\n\n"
-            "هل أنت متأكد من رغبتك في تفريغ قاعدة البيانات وحذف **جميع الكتب المؤرشفة بالكامل**؟ لا يمكن التراجع عن هذا الإجراء.",
+            "⚠️ *تحذير خطير جداً!*\n\nهل أنت متأكد من رغبتك في تفريغ قاعدة البيانات وحذف **جميع الكتب**؟",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -453,11 +470,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         conn.close()
 
         keyboard = [[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_home")]]
-        await query.edit_message_text(
-            "✅ تم تفريغ الأرشيف وحذف كافة السجلات بنجاح تام.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_text("✅ تم تفريغ الأرشيف وحذف كافة السجلات بنجاح تام.", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -504,13 +517,6 @@ def extract_part_number(filename):
         val_en = val.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val_en.isdigit():
             return int(val_en)
-
-    num_match = TRAILING_NUM_PATTERN.search(filename)
-    if num_match:
-        val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
-        if val.isdigit():
-            return int(val)
-
     return None
 
 
@@ -716,7 +722,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 break
 
         if not clean_query:
-                    clean_query = text
+            clean_query = text
 
         norm_query = normalize_arabic(clean_query)
 
@@ -805,3 +811,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
