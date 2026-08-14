@@ -15,10 +15,6 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# استيراد أدوات بناء الـ PDF وتنسيق النصوص العربية
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-
 # مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
 if not os.path.exists(DATA_DIR):
@@ -28,13 +24,18 @@ DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 
+# معرف قناتك الثابت (يُستخدم كافتراضي عند عدم تحديد مصدر آخر)
 CHANNEL_ID = -1004395670008
+
+# قائمة مشرفي البوت المصرح لهم حصراً بإضافته للمجموعات وبالأرشفة اليدوية وإدارة اللوحة
 ADMIN_IDS = [7898871921, 1937491557]
 
+# معرف البوت وبيانات المجموعة الرئيسية
 BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
 
+# النصوص
 RESTRICTED_TEXT = (
     f"عذراً، هذا البوت خاص بمجموعة [{GROUP_NAME}]({GROUP_LINK}) ولا يمكن استخدامه بشكل فردي أو من قِبل جهات خارجية أخرى.\n\n"
     f"يمكنك الانضمام إلينا والمشاركة معنا عبر رابط المجموعة أعلاه."
@@ -49,10 +50,15 @@ LEAVE_TEXT = (
 ADMIN_HELP_TEXT = (
     "📌 *دليل استخدام البوت وتقسيم الصلاحيات*\n\n"
     "━━━━━━ 👑 *صلاحيات المشرف* ━━━━━━\n\n"
-    "• *لوحة التحكم والأزرار:* عند إرسال `/start` في الخاص، تظهر لك لوحة تفاعلية لإدارة الأرشيف وإحصائيات واستخراج القائمة بصيغة PDF.\n\n"
+    "• *لوحة التحكم والأزرار:* عند إرسال `/start` في الخاص، تظهر لك لوحة تفاعلية لإدارة الأرشيف والإحصائيات.\n\n"
     "• *تفعيل المجموعات:* يمكنك إضافة البوت لأي مجموعة جديدة لتفعيلها تلقائياً واستخدامها من قِبل الأعضاء.\n\n"
-    "• *الأرشفة التاريخية (JSON):* صدّر سجل القناة أو الكروب من Telegram Desktop، ثم أرسل ملف `result.json` للبوت في الخاص.\n\n"
-    "• *الأرشفة الآلية:* بمجرد رفع أي ملف جديد في القناة أو أي كروب معتمد، يتم حفظه وفهرسته في قاعدة البيانات فوراً."
+    "• *الأرشفة التاريخية (JSON):* صدّر سجل القناة أو الكروب من Telegram Desktop (Export chat history → JSON)، ثم أرسل ملف `result.json` للبوت في الخاص، مع كتابة معرّف المحادثة (chat_id) كتعليق على الملف. سيقوم البوت بأرشفة كل الكتب الموجودة فيه دفعة واحدة.\n\n"
+    "• *الأرشفة الآلية:* بمجرد رفع أي ملف جديد في القناة أو أي كروب معتمد، يتم حفظه وفهرسته في قاعدة البيانات فوراً.\n\n"
+    "━━━━━━ 👥 *صلاحيات وإرشادات الأعضاء* ━━━━━━\n\n"
+    "• *الاستخدام المقيّد:* يقتصر استخدام الأعضاء للبوت على المجموعات المعتمدة التي قمت بتفعيلها فقط.\n\n"
+    "• *طرق البحث المتاحة:* يمكن للعضو البحث داخل المجموعة عن طريق:\n"
+    "  1️⃣ الإشارة للبوت: `@RCGivvvv_bot اسم الكتاب`\n"
+    "  2️⃣ أو عمل رد (Reply) على أي رسالة للبوت بكتابة اسم الكتاب."
 )
 
 
@@ -175,6 +181,7 @@ async def on_bot_left_group(update: Update, context: ContextTypes.DEFAULT_TYPE):
             conn.close()
 
 
+# --- أرشفة تلقائية لأي ملف جديد يُرفع في القناة أو أي كروب معتمد ---
 async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message = update.channel_post or update.message
     if not message:
@@ -207,6 +214,7 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.close()
 
 
+# --- استيراد أرشيف تاريخي من ملف result.json ---
 async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
@@ -225,7 +233,7 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
         source_chat_id = CHANNEL_ID
 
     status_msg = await update.message.reply_text(
-        f"🚀 جاري تحليل ملف التصدير وأرشفة الملفات...",
+        f"🚀 جاري تحليل ملف التصدير وأرشفة الملفات (المصدر: `{source_chat_id}`)...",
         parse_mode="Markdown"
     )
 
@@ -238,6 +246,7 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
             data = json.load(f)
 
         messages = data.get("messages", [])
+        total_msgs = len(messages)
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -246,6 +255,8 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         batch = []
         BATCH_SIZE = 2000
+        processed = 0
+        last_reported_percent = -1
 
         def extract_book_name(msg):
             book_name = msg.get("file_name")
@@ -261,6 +272,7 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
             return book_name
 
         for msg in messages:
+            processed += 1
             if msg.get("file") or msg.get("media_type"):
                 msg_id = msg.get("id")
                 if msg_id is not None:
@@ -275,6 +287,16 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
                 conn.commit()
                 batch.clear()
 
+            percent = int((processed / total_msgs) * 100) if total_msgs else 100
+            if percent >= last_reported_percent + 10:
+                last_reported_percent = percent
+                try:
+                    await status_msg.edit_text(
+                        f"⏳ جاري الأرشفة... {percent}% ({processed}/{total_msgs})"
+                    )
+                except Exception:
+                    pass
+
         if batch:
             cursor.executemany(
                 "INSERT OR IGNORE INTO archive (book_name, msg_id, source_chat_id) VALUES (?, ?, ?)",
@@ -288,22 +310,17 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
         conn.close()
         os.remove(json_path)
 
-        await status_msg.edit_text(f"✅ تمت الأرشفة بنجاح! الإجمالي الحالي: `{final_count}`")
+        await status_msg.edit_text(
+            f"✅ تمت الأرشفة بنجاح!\n"
+            f"عدد الرسائل المفحوصة في هذا الملف: `{total_msgs}`\n"
+            f"إجمالي الكتب المؤرشفة الآن لهذا المصدر: `{final_count}`"
+        )
 
     except Exception as e:
         await status_msg.edit_text(f"❌ حدث خطأ أثناء المعالجة:\n`{e}`", parse_mode="Markdown")
 
 
-def get_admin_keyboard():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 إحصائيات الأرشيف", callback_data="admin_stats")],
-        [InlineKeyboardButton("📄 استخراج أسماء الكتب (PDF)", callback_data="admin_export_pdf")],
-        [InlineKeyboardButton("🗑️ حذف عدد معين من الأرشيف", callback_data="admin_ask_delete_count")],
-        [InlineKeyboardButton("⚠️ حذف كامل الأرشيف (تفريغ القاعدة)", callback_data="admin_confirm_clear")],
-        [InlineKeyboardButton("📌 دليل الاستخدام والمساعدة", callback_data="admin_help")]
-    ])
-
-
+# --- واجهة لوحة تحكم الآدمن مع الأزرار التفاعلية ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
@@ -313,7 +330,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await update.message.reply_text(
             f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
-            f"للبحث عن أي كتاب، يمكنك الإشارة للبوت `@{BOT_USERNAME}` أو الرد على رسائله.",
+            f"للبحث عن أي كتاب، يمكنك:\n"
+            f"1️⃣ إشارة للبوت: `@{BOT_USERNAME} اسم الكتاب`\n"
+            f"2️⃣ أو عمل (رد/Reply) على أي رسالة للبوت وكتابة اسم الكتاب مباشرة.",
             parse_mode="Markdown"
         )
         return
@@ -328,17 +347,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             total_groups = cursor.fetchone()[0]
             conn.close()
 
+            keyboard = [
+                [InlineKeyboardButton("📊 إحصائيات الأرشيف", callback_data="admin_stats")],
+                [InlineKeyboardButton("🗑️ حذف عدد معين من الأرشيف", callback_data="admin_ask_delete_count")],
+                [InlineKeyboardButton("⚠️ حذف كامل الأرشيف (تفريغ القاعدة)", callback_data="admin_confirm_clear")],
+                [InlineKeyboardButton("📌 دليل الاستخدام والمساعدة", callback_data="admin_help")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
             welcome_msg = (
                 f"أهلاً بك في لوحة تحكم الآدمن الرئيسية 📚⚙️\n\n"
                 f"• إجمالي الكتب المؤرشفة حالياً: `{total_books}` كتاب\n"
                 f"• المجموعات المعتمدة المفعلة: `{total_groups}` مجموعة\n\n"
                 f"اختر ما تريده من الأزرار أدناه:"
             )
-            await update.message.reply_text(welcome_msg, parse_mode="Markdown", reply_markup=get_admin_keyboard())
+            await update.message.reply_text(welcome_msg, parse_mode="Markdown", reply_markup=reply_markup)
         else:
-            await update.message.reply_text(RESTRICTED_TEXT, parse_mode="Markdown", disable_web_page_preview=True)
+            await update.message.reply_text(
+                RESTRICTED_TEXT,
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
 
 
+# --- معالجة الضغط على أزرار لوحة التحكم ---
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -361,58 +393,10 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
         stats_text = f"📊 *إحصائيات قاعدة البيانات الشاملة*\n\n• إجمالي الكتب المؤرشفة: `{total}`\n\n*التوزيع حسب المصدر:* \n"
         for src, count in sources:
-            stats_text += f"- الكروب/القناة (`{src}`): `{count}` كتاب\n"
+            stats_text += f"- القناة/المجموعة (`{src}`): `{count}` كتاب\n"
 
         keyboard = [[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_home")]]
         await query.edit_message_text(stats_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
-
-    elif data == "admin_export_pdf":
-        status_msg = await query.message.reply_text("⏳ جاري توليد ملف الـ PDF لجميع أسماء الكتب، قد يستغرق ذلك ثواني...")
-        try:
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("SELECT DISTINCT book_name FROM archive ORDER BY id DESC")
-            books = cursor.fetchall()
-            conn.close()
-
-            pdf_path = os.path.join(DATA_DIR, "books_archive_list.pdf")
-            
-            c = canvas.Canvas(pdf_path, pagesize=letter)
-            width, height = letter
-            
-            c.setFont("Helvetica-Bold", 16)
-            c.drawString(50, height - 50, "Reading Community - Books Archive List")
-            c.setFont("Helvetica", 10)
-            c.drawString(50, height - 70, f"Total Books: {len(books)}")
-            c.line(50, height - 80, width - 50, height - 80)
-            
-            y = height - 100
-            c.setFont("Helvetica", 9)
-            
-            for idx, (bname,) in enumerate(books, 1):
-                clean_name = f"{idx}. {bname}".replace('\n', ' ')
-                if len(clean_name) > 110:
-                    clean_name = clean_name[:107] + "..."
-                
-                c.drawString(50, y, clean_name)
-                y -= 18
-                
-                if y < 50:
-                    c.showPage()
-                    c.setFont("Helvetica", 9)
-                    y = height - 50
-                    
-            c.save()
-
-            await context.bot.send_document(
-                chat_id=query.message.chat_id,
-                document=pdf_path,
-                caption=f"📄 ملف PDF يحتوي على قائمة أسماء الكتب المؤرشفة (الإجمالي: {len(books)} كتاب)."
-            )
-            os.remove(pdf_path)
-            await status_msg.delete()
-        except Exception as e:
-            await status_msg.edit_text(f"❌ حدث خطأ أثناء إنشاء ملف الـ PDF:\n`{e}`", parse_mode="Markdown")
 
     elif data == "admin_home":
         conn = sqlite3.connect(DB_PATH)
@@ -423,13 +407,19 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         total_groups = cursor.fetchone()[0]
         conn.close()
 
+        keyboard = [
+            [InlineKeyboardButton("📊 إحصائيات الأرشيف", callback_data="admin_stats")],
+            [InlineKeyboardButton("🗑️ حذف عدد معين من الأرشيف", callback_data="admin_ask_delete_count")],
+            [InlineKeyboardButton("⚠️ حذف كامل الأرشيف (تفريغ القاعدة)", callback_data="admin_confirm_clear")],
+            [InlineKeyboardButton("📌 دليل الاستخدام والمساعدة", callback_data="admin_help")]
+        ]
         welcome_msg = (
             f"أهلاً بك في لوحة تحكم الآدمن الرئيسية 📚⚙️\n\n"
             f"• إجمالي الكتب المؤرشفة حالياً: `{total_books}` كتاب\n"
             f"• المجموعات المعتمدة المفعلة: `{total_groups}` مجموعة\n\n"
             f"اختر ما تريده من الأزرار أدناه:"
         )
-        await query.edit_message_text(welcome_msg, parse_mode="Markdown", reply_markup=get_admin_keyboard())
+        await query.edit_message_text(welcome_msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif data == "admin_help":
         keyboard = [[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_home")]]
@@ -439,7 +429,8 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         context.user_data['waiting_for_delete_count'] = True
         keyboard = [[InlineKeyboardButton("❌ إلغاء", callback_data="admin_home")]]
         await query.edit_message_text(
-            "🗑️ *حذف عدد معين من الأرشيف*\n\nالرجاء كتابة **عدد الكتب** المراد حذفها (مثلاً: `500`) كرسالة نصية.",
+            "🗑️ *حذف عدد معين من الأرشيف*\n\n"
+            "الرجاء كتابة **عدد الكتب** المراد حذفها (مثلاً: `500` أو `1000` من أحدث الكتب المضافة) وإرسالها برقم صحيح في هذه المحادثة.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -450,7 +441,8 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             [InlineKeyboardButton("❌ تراجع وإلغاء", callback_data="admin_home")]
         ]
         await query.edit_message_text(
-            "⚠️ *تحذير خطير جداً!*\n\nهل أنت متأكد من رغبتك في تفريغ قاعدة البيانات وحذف **جميع الكتب**؟",
+            "⚠️ *تحذير خطير جداً!*\n\n"
+            "هل أنت متأكد من رغبتك في تفريغ قاعدة البيانات وحذف **جميع الكتب المؤرشفة بالكامل**؟ لا يمكن التراجع عن هذا الإجراء بعد تنفيذه.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
@@ -463,7 +455,11 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         conn.close()
 
         keyboard = [[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_home")]]
-        await query.edit_message_text("✅ تم تفريغ الأرشيف وحذف كافة السجلات بنجاح تام.", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(
+            "✅ تم تفريغ الأرشيف وحذف كافة السجلات بنجاح تام.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -473,12 +469,25 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat_type in ['group', 'supergroup']:
         if not await is_allowed_group(update, context):
             return
-        await update.message.reply_text("للبحث عن أي كتاب، استخدم إشارة البوت أو الرد على رسائله.")
+        await update.message.reply_text(
+            f"أهلاً بكم في مجموعة مجتمع القراءة! 📚\n\n"
+            f"للبحث عن أي كتاب، يمكنك:\n"
+            f"1️⃣ إشارة للبوت: `@{BOT_USERNAME} اسم الكتاب`\n"
+            f"2️⃣ أو عمل (رد/Reply) على أي رسالة للبوت وكتابة اسم الكتاب مباشرة.",
+            parse_mode="Markdown"
+        )
     elif chat_type == 'private':
         if user_id in ADMIN_IDS:
-            await update.message.reply_text(ADMIN_HELP_TEXT, parse_mode="Markdown")
+            await update.message.reply_text(
+                ADMIN_HELP_TEXT,
+                parse_mode="Markdown"
+            )
         else:
-            await update.message.reply_text(RESTRICTED_TEXT, parse_mode="Markdown", disable_web_page_preview=True)
+            await update.message.reply_text(
+                RESTRICTED_TEXT,
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
 
 
 ARABIC_NUM_WORDS = {
@@ -510,6 +519,13 @@ def extract_part_number(filename):
         val_en = val.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val_en.isdigit():
             return int(val_en)
+
+    num_match = TRAILING_NUM_PATTERN.search(filename)
+    if num_match:
+        val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
+        if val.isdigit():
+            return int(val)
+
     return None
 
 
@@ -618,13 +634,8 @@ async def send_book_results(update, context, valid_books):
                 message_id=msg_id
             )
             await asyncio.sleep(0.4)
-        except Exception as e:
-            # إظهار السبب الحقيقي لخطأ إعادة التوجيه للمشرف في الخاص
-            if update.effective_chat.type == 'private' and update.effective_user.id in ADMIN_IDS:
-                await update.message.reply_text(
-                    f"❌ تعذر إرسال الكتاب (`{book_name}`):\nالسبب التقني: `{e}`",
-                    parse_mode="Markdown"
-                )
+        except Exception:
+            pass
 
 
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -638,6 +649,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if text.startswith('/'):
         return
 
+    # معالجة إدخال عدد الكتب المراد حذفها من قبل الآدمن
     if chat_type == 'private' and user_id in ADMIN_IDS:
         if context.user_data.get('waiting_for_delete_count'):
             context.user_data['waiting_for_delete_count'] = False
@@ -645,6 +657,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 count_to_delete = int(text)
                 conn = sqlite3.connect(DB_PATH)
                 cursor = conn.cursor()
+                # حذف أحدث عدد تم تحديده بناءً على الـ id الأكبر
                 cursor.execute(
                     "DELETE FROM archive WHERE id IN (SELECT id FROM archive ORDER BY id DESC LIMIT ?)",
                     (count_to_delete,)
@@ -662,7 +675,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             except ValueError:
                 keyboard = [[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_home")]]
                 await update.message.reply_text(
-                    "❌ القيمة المدخلة غير صالحة. يرجى إرسال رقم صحيح.",
+                    "❌ القيمة المدخلة غير صالحة. يرجى إرسال رقم صحيح (مثال: `100`).",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup(keyboard)
                 )
@@ -670,7 +683,11 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if chat_type == 'private':
         if user_id not in ADMIN_IDS:
-            await update.message.reply_text(RESTRICTED_TEXT, parse_mode="Markdown", disable_web_page_preview=True)
+            await update.message.reply_text(
+                RESTRICTED_TEXT,
+                parse_mode="Markdown",
+                disable_web_page_preview=True
+            )
             return
         clean_query = text
 
@@ -725,6 +742,8 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         norm_query = normalize_arabic(clean_query)
 
     if not norm_query or len(norm_query) < 2:
+        if chat_type == 'private':
+            await update.message.reply_text("⚠️ يرجى كتابة اسم كتاب أو كلمة بحث صالحة تحتوي على أحرف.")
         return
 
     conn = sqlite3.connect(DB_PATH)
@@ -745,16 +764,24 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             r for r in filtered_records
             if norm_query in normalize_arabic(r[0])
         ]
+
         if not results:
-            await update.message.reply_text(f"❌ لم يتم العثور على أي كتب للكاتب ('{author_query}').")
+            await update.message.reply_text(
+                f"❌ لم يتم العثور على أي كتب باسم الكاتب ('{author_query}') في أرشيف القناة."
+            )
             return
+
         deduped = dedupe_exact(results)
         await send_book_results(update, context, deduped)
         return
 
     results = find_book_matches(norm_query, filtered_records)
+
     if not results:
-        await update.message.reply_text(f"❌ عذراً، الاسم ('{clean_query}') غير موجود في الأرشيف.")
+        await update.message.reply_text(
+            f"❌ عذراً، الاسم ('{clean_query}') غير موجود في أرشيف القناة.\n"
+            f"تأكد من كتابة اسم الكتاب بشكل أقرب للعنوان الأصلي، أو حاول باسم مختصر أدق."
+        )
         return
 
     deduped = dedupe_exact(results)
@@ -803,7 +830,7 @@ def main():
         search_and_forward
     ))
 
-    print("البوت يعمل بكفاءة تامة...")
+    print("البوت جاهز ويعمل بكفاءة مع لوحة تحكم الآدمن والتفقد التفاعلي...")
     application.run_polling()
 
 
