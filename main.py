@@ -1,4 +1,4 @@
-Import os
+import os
 import json
 import sqlite3
 import re
@@ -745,5 +745,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
 
