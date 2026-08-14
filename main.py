@@ -1,4 +1,4 @@
-import os
+Import os
 import json
 import sqlite3
 import re
@@ -13,7 +13,6 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
-from pyrogram import Client as PyroClient
 
 # مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
@@ -23,11 +22,6 @@ if not os.path.exists(DATA_DIR):
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
-
-# بيانات API لحساب المستخدم (Userbot) المستخدم في البحث الحي داخل القناة
-API_ID = 34123643
-API_HASH = "12dccc6e1dce1c82853587ba04e9694d"
-USER_SESSION_STRING = os.environ.get("USER_SESSION_STRING")  # يُضاف كمتغير بيئة سري في Railway
 
 # معرف قناتك الثابت (يُستخدم كافتراضي عند عدم تحديد مصدر آخر)
 CHANNEL_ID = -1004395670008
@@ -39,17 +33,6 @@ ADMIN_IDS = [7898871921, 1937491557]
 BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
 GROUP_LINK = "https://t.me/reading_community_group"
-
-# عميل حساب المستخدم (Userbot) للبحث الحي داخل القناة — يُهيَّأ فقط إن وُجد USER_SESSION_STRING
-user_client = None
-if USER_SESSION_STRING:
-    user_client = PyroClient(
-        "user_search_session",
-        api_id=API_ID,
-        api_hash=API_HASH,
-        session_string=USER_SESSION_STRING,
-        in_memory=True,  # لا حاجة لحفظ ملف جلسة على القرص
-    )
 
 # النصوص
 RESTRICTED_TEXT = (
@@ -569,30 +552,6 @@ def find_book_matches(norm_query, all_records):
     return fuzzy_matches
 
 
-async def live_search_channel(query, limit=80):
-    """
-    بحث حي مباشر داخل القناة عبر حساب المستخدم (Userbot)، يُستخدم فقط كخطة احتياطية
-    عندما لا يُعثر على الكتاب في الأرشفة المحلية — يغطي الملفات القديمة جداً
-    التي رُفعت قبل انضمام البوت، دون الحاجة لأي أرشفة مسبقة.
-    """
-    if not user_client or not query:
-        return []
-
-    results = []
-    try:
-        async for msg in user_client.search_messages(CHANNEL_ID, query=query, limit=limit):
-            document = msg.document or msg.video or msg.audio
-            if not document:
-                continue
-            book_name = document.file_name or (msg.caption or f"Book_{msg.id}")
-            results.append((book_name, msg.id, CHANNEL_ID))
-    except Exception:
-        # أي خطأ (فقدان اتصال الـ userbot، حد الطلبات، إلخ) لا يجب أن يوقف البوت
-        return []
-
-    return results
-
-
 async def send_book_results(update, context, valid_books):
     """يحوّل قائمة الكتب من القناة مباشرة (يظهر 'محوّلة من القناة' مع الوصف الأصلي كاملاً)"""
     for book_name, msg_id, source_chat_id in valid_books:
@@ -705,13 +664,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if norm_query in normalize_arabic(r[0])
         ]
 
-        # خطة احتياطية: بحث حي داخل القناة لتغطية الكتب القديمة غير المؤرشفة محلياً بعد
-        if user_client:
-            live_results = await live_search_channel(author_query, limit=100)
-            for r in live_results:
-                if norm_query in normalize_arabic(r[0]):
-                    results.append(r)
-
         if not results:
             await update.message.reply_text(
                 f"❌ لم يتم العثور على أي كتب باسم الكاتب ('{author_query}') في أرشيف القناة."
@@ -724,12 +676,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # ============= وضع البحث العادي عن كتاب/سلسلة واحدة (بحث دقيق ضد التطابق الفضفاض) =============
     results = find_book_matches(norm_query, filtered_records)
-
-    # خطة احتياطية: إن لم يُعثر على الكتاب محلياً، ابحث عنه حياً داخل القناة مباشرة
-    # (يغطي الملفات القديمة جداً التي رُفعت قبل انضمام البوت، دون حاجة لأرشفة يدوية)
-    if not results and user_client:
-        live_candidates = await live_search_channel(clean_query, limit=80)
-        results = find_book_matches(norm_query, live_candidates)
 
     if not results:
         await update.message.reply_text(
@@ -764,35 +710,11 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await send_book_results(update, context, final_books)
 
 
-async def post_init(application):
-    """يبدأ تشغيل حساب البحث الحي (Userbot) مع بدء تشغيل البوت، إن وُجد الإعداد اللازم"""
-    if user_client:
-        try:
-            await user_client.start()
-            print("✅ عميل البحث الحي (Userbot) متصل بنجاح.")
-        except Exception as e:
-            print(f"⚠️ تعذّر تشغيل عميل البحث الحي: {e}")
-    else:
-        print("ℹ️ USER_SESSION_STRING غير مُعرَّف — البحث الحي للملفات القديمة معطّل، سيعتمد البوت على الأرشفة المحلية فقط.")
-
-
-async def post_shutdown(application):
-    """يوقف عميل البحث الحي بأمان عند إيقاف البوت"""
-    if user_client and user_client.is_connected:
-        await user_client.stop()
-
-
 def main():
     init_db()
     migrate_db()
 
-    application = (
-        ApplicationBuilder()
-        .token(TOKEN)
-        .post_init(post_init)
-        .post_shutdown(post_shutdown)
-        .build()
-    )
+    application = ApplicationBuilder().token(TOKEN).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
@@ -806,7 +728,7 @@ def main():
         handle_new_upload
     ))
 
-    # استيراد أرشيف تاريخي (JSON) من الخاص فقط — اختياري الآن، البحث الحي يغطي الملفات القديمة تلقائياً
+    # استيراد أرشيف تاريخي (JSON) من الخاص فقط
     application.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.Document.FileExtension("json"),
         import_json_archive
@@ -823,3 +745,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
