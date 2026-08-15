@@ -5,6 +5,7 @@ import re
 import asyncio
 import difflib
 import urllib.request
+import traceback
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -467,6 +468,8 @@ TRAILING_NUM_PATTERN = re.compile(r'[\s\-_]([0-9٠-٩]+)\s*(?:\.pdf|\.epub|\.zip
 
 
 def extract_part_number(filename):
+    if not filename:
+        return None
     match = PART_PATTERN.search(filename)
     if match:
         val = match.group(2)
@@ -487,6 +490,8 @@ def extract_part_number(filename):
 
 def strip_part_pattern(filename):
     """يزيل إشارة الجزء/المجلد من الاسم للحصول على 'الاسم الأساسي' للسلسلة"""
+    if not filename:
+        return ""
     stripped = PART_PATTERN.sub('', filename)
     stripped = TRAILING_NUM_PATTERN.sub('', stripped)
     stripped = re.sub(r'\.(pdf|epub|zip|mobi|docx?)$', '', stripped, flags=re.IGNORECASE)
@@ -551,54 +556,98 @@ def group_into_series(records):
     return groups
 
 
-def find_book_matches(norm_query, all_records):
+# ==================== فهرس البحث المُخزَّن مؤقتاً (Search Index Cache) ====================
+# بدل مسح كامل الأرشيف (قد يصل لمئات الآلاف من الكتب) مع كل رسالة بحث، نبني فهرساً
+# مرة واحدة فقط ونعيد استخدامه، ونعيد بناءه تلقائياً فقط عند تغيّر الأرشيف فعلياً.
+_search_index_cache = {"fingerprint": None, "records": [], "base_keys": [], "index": {}}
+
+
+def get_search_index():
+    """يُرجع (records, base_keys, index) من الذاكرة المؤقتة، ويعيد البناء فقط عند تغيّر الأرشيف"""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM archive")
+    fingerprint = cursor.fetchone()
+
+    if _search_index_cache["fingerprint"] == fingerprint:
+        conn.close()
+        return _search_index_cache["records"], _search_index_cache["base_keys"], _search_index_cache["index"]
+
+    cursor.execute("SELECT book_name, msg_id, source_chat_id FROM archive GROUP BY msg_id, source_chat_id")
+    raw_records = cursor.fetchall()
+    conn.close()
+
+    norm_forbidden = [normalize_arabic(p) for p in FORBIDDEN_PREFIXES]
+
+    records = []
+    base_keys = []
+    index = defaultdict(set)
+
+    for book_name, msg_id, source_chat_id in raw_records:
+        norm_name = normalize_arabic(book_name)
+        if any(norm_name.startswith(p) for p in norm_forbidden):
+            continue  # استبعاد نهائي للبادئات غير المرغوبة (صور من، مختصر...)
+
+        base_key = normalize_arabic(strip_part_pattern(book_name))
+        i = len(records)
+        records.append((book_name, msg_id, source_chat_id))
+        base_keys.append(base_key)
+        for w in get_words(base_key):
+            index[w].add(i)
+
+    _search_index_cache["fingerprint"] = fingerprint
+    _search_index_cache["records"] = records
+    _search_index_cache["base_keys"] = base_keys
+    _search_index_cache["index"] = index
+
+    return records, base_keys, index
+
+
+def find_book_matches_indexed(norm_query, records, base_keys, index):
     """
-    بحث دقيق بأولويات صارمة لتفادي إرسال كتب غير مرتبطة بالطلب:
+    بحث دقيق وسريع (يعتمد على فهرس مبني مسبقاً بدل مسح كل السجلات):
     1) تطابق تام كامل للاسم (بعد حذف الامتداد ورقم الجزء)
     2) (فقط للطلبات متعددة الكلمات) الاسم يبدأ بنص الطلب بالكامل
-    3) (فقط للطلبات متعددة الكلمات) كل كلمات الطلب موجودة كاملة داخل اسم الكتاب
-    4) (فقط للطلبات متعددة الكلمات) تطابق تقريبي على مستوى كل كلمة (يسمح بأخطاء إملائية بسيطة)
-    الطلبات المكوّنة من كلمة واحدة فقط تُقبل حصراً عند التطابق التام،
-    لتفادي مشاكل مثل طلب "إدارة" وحده الذي يطابق عشرات العناوين المختلفة.
+    3) (فقط للطلبات متعددة الكلمات) كل كلمات الطلب موجودة كاملة — عبر الفهرس مباشرة (سريع جداً)
+    4) (فقط للطلبات متعددة الكلمات) تطابق تقريبي، محسوب فقط على مفردات الفهرس (وليس كل السجلات)
+    الطلبات المكوّنة من كلمة واحدة فقط تُقبل حصراً عند التطابق التام.
     """
     query_words = get_words(norm_query)
 
-    base_keys = {}
-    for record in all_records:
-        book_name = record[0]
-        base_keys[book_name] = normalize_arabic(strip_part_pattern(book_name))
-
-    # 1) تطابق تام (على الاسم بعد حذف الامتداد ورقم الجزء)
-    exact = [r for r in all_records if base_keys[r[0]] == norm_query]
+    # 1) تطابق تام
+    exact = [records[i] for i, bk in enumerate(base_keys) if bk == norm_query]
     if exact:
         return exact
 
-    # الطلبات المكوّنة من كلمة واحدة فقط تتوقف هنا تماماً (لا مطابقة فضفاضة إطلاقاً)
     if len(query_words) < 2:
         return []
 
-    # 2) الاسم يبدأ بنص الطلب بالكامل
-    startswith_matches = [r for r in all_records if base_keys[r[0]].startswith(norm_query)]
+    # 2) الاسم يبدأ بنص الطلب بالكامل (مقارنة نصية بسيطة، سريعة حتى مع مئات الآلاف من السجلات)
+    startswith_matches = [records[i] for i, bk in enumerate(base_keys) if bk.startswith(norm_query)]
     if startswith_matches:
         return startswith_matches
 
-    # 3) كل كلمات الطلب موجودة كاملة (بأي ترتيب) داخل اسم الكتاب
-    word_matches = []
-    for r in all_records:
-        name_words = get_words(base_keys[r[0]])
-        if all(qw in name_words for qw in query_words):
-            word_matches.append(r)
-    if word_matches:
-        return word_matches
+    # 3) كل كلمات الطلب موجودة كاملة — عبر تقاطع مجموعات الفهرس مباشرة (O(1) لكل كلمة تقريباً)
+    word_sets = [index.get(qw) for qw in query_words]
+    if all(word_sets):
+        common = set.intersection(*word_sets)
+        if common:
+            return [records[i] for i in common]
 
-    # 4) تطابق تقريبي على مستوى كل كلمة (يتحمل أخطاء إملائية بسيطة) — لكل كلمات الطلب معاً
-    fuzzy_matches = []
-    for r in all_records:
-        name_words = get_words(base_keys[r[0]])
-        if all(difflib.get_close_matches(qw, name_words, n=1, cutoff=0.8) for qw in query_words):
-            fuzzy_matches.append(r)
+    # 4) تطابق تقريبي (أخطاء إملائية بسيطة) — يُحسب فقط على مفردات الفهرس، وليس كل السجلات
+    vocabulary = list(index.keys())
+    per_word_candidates = []
+    for qw in query_words:
+        close_words = difflib.get_close_matches(qw, vocabulary, n=5, cutoff=0.8)
+        if not close_words:
+            return []
+        word_candidates = set()
+        for w in close_words:
+            word_candidates |= index.get(w, set())
+        per_word_candidates.append(word_candidates)
 
-    return fuzzy_matches
+    common = set.intersection(*per_word_candidates) if per_word_candidates else set()
+    return [records[i] for i in common]
 
 
 def build_admin_panel_keyboard():
@@ -938,84 +987,89 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text("⚠️ يرجى كتابة اسم كتاب أو كلمة بحث صالحة تحتوي على أحرف.")
         return
 
-    conn = sqlite3.connect(DB_PATH)
-    cursor = conn.cursor()
-    cursor.execute("SELECT book_name, msg_id, source_chat_id FROM archive GROUP BY msg_id, source_chat_id")
-    all_records = cursor.fetchall()
-    conn.close()
+    try:
+        records, base_keys, index = await asyncio.to_thread(get_search_index)
 
-    norm_forbidden = [normalize_arabic(p) for p in FORBIDDEN_PREFIXES]
+        # ============= وضع "كل كتب الكاتب" =============
+        if is_author_request:
+            results = [
+                records[i] for i, bk in enumerate(base_keys)
+                if norm_query in bk
+            ]
 
-    # نستبعد الملفات ذات البادئات غير المرغوبة (صور من، مختصر...) من كل عمليات البحث
-    filtered_records = [
-        r for r in all_records
-        if not any(normalize_arabic(r[0]).startswith(p) for p in norm_forbidden)
-    ]
+            # خطة احتياطية: بحث حي داخل القناة لتغطية الكتب القديمة غير المؤرشفة محلياً بعد
+            if user_client:
+                live_results = await live_search_channel(author_query, limit=100)
+                for r in live_results:
+                    if norm_query in normalize_arabic(r[0]):
+                        results.append(r)
 
-    # ============= وضع "كل كتب الكاتب" =============
-    if is_author_request:
-        results = [
-            r for r in filtered_records
-            if norm_query in normalize_arabic(r[0])
-        ]
+            if not results:
+                await update.message.reply_text(
+                    f"❌ لم يتم العثور على أي كتب باسم الكاتب ('{author_query}') في أرشيف القناة."
+                )
+                return
 
-        # خطة احتياطية: بحث حي داخل القناة لتغطية الكتب القديمة غير المؤرشفة محلياً بعد
-        if user_client:
-            live_results = await live_search_channel(author_query, limit=100)
-            for r in live_results:
-                if norm_query in normalize_arabic(r[0]):
-                    results.append(r)
+            deduped = dedupe_exact(results)
+            await send_book_results(update, context, deduped)
+            return
+
+        # ============= وضع البحث العادي عن كتاب/سلسلة واحدة (بحث دقيق ضد التطابق الفضفاض) =============
+        results = await asyncio.to_thread(find_book_matches_indexed, norm_query, records, base_keys, index)
+
+        # خطة احتياطية: إن لم يُعثر على الكتاب محلياً، ابحث عنه حياً داخل القناة مباشرة
+        # (يغطي الملفات القديمة جداً التي رُفعت قبل انضمام البوت، دون حاجة لأرشفة يدوية)
+        if not results and user_client:
+            live_candidates = await live_search_channel(clean_query, limit=80)
+            live_base_keys = [normalize_arabic(strip_part_pattern(r[0])) for r in live_candidates]
+            live_index = defaultdict(set)
+            for i, bk in enumerate(live_base_keys):
+                for w in get_words(bk):
+                    live_index[w].add(i)
+            results = find_book_matches_indexed(norm_query, live_candidates, live_base_keys, live_index)
 
         if not results:
             await update.message.reply_text(
-                f"❌ لم يتم العثور على أي كتب باسم الكاتب ('{author_query}') في أرشيف القناة."
+                f"❌ عذراً، الاسم ('{clean_query}') غير موجود في أرشيف القناة.\n"
+                f"تأكد من كتابة اسم الكتاب بشكل أقرب للعنوان الأصلي، أو حاول باسم مختصر أدق."
             )
             return
 
+        # حذف التكرار الحرفي أولاً
         deduped = dedupe_exact(results)
-        await send_book_results(update, context, deduped)
-        return
 
-    # ============= وضع البحث العادي عن كتاب/سلسلة واحدة (بحث دقيق ضد التطابق الفضفاض) =============
-    results = find_book_matches(norm_query, filtered_records)
+        # تجميع النتائج حسب السلسلة (الاسم الأساسي بدون رقم الجزء)
+        groups = group_into_series(deduped)
 
-    # خطة احتياطية: إن لم يُعثر على الكتاب محلياً، ابحث عنه حياً داخل القناة مباشرة
-    # (يغطي الملفات القديمة جداً التي رُفعت قبل انضمام البوت، دون حاجة لأرشفة يدوية)
-    if not results and user_client:
-        live_candidates = await live_search_channel(clean_query, limit=80)
-        results = find_book_matches(norm_query, live_candidates)
+        # نختار المجموعة الأكثر تطابقاً مع طلب المستخدم:
+        # إن كانت كل النتائج تنتمي لنفس السلسلة، نرسلها كاملة (كل الأجزاء).
+        # إن كانت هناك عدة كتب مختلفة مطابقة (بحث عام)، نرسل كل مجموعة على حدة.
+        final_books = []
+        for base_key, items in groups.items():
+            distinct_parts = {extract_part_number(b) for b, _, _ in items if extract_part_number(b) is not None}
+            if len(distinct_parts) >= 2:
+                # سلسلة متعددة الأجزاء: أرسل كل الأجزاء مرتبة
+                sorted_items = sorted(
+                    items,
+                    key=lambda x: (extract_part_number(x[0]) is None, extract_part_number(x[0]) or 0)
+                )
+                final_books.extend(sorted_items)
+            else:
+                # كتاب واحد فقط لهذه المجموعة: أرسل أول نسخة غير مكررة فقط
+                final_books.append(items[0])
 
-    if not results:
-        await update.message.reply_text(
-            f"❌ عذراً، الاسم ('{clean_query}') غير موجود في أرشيف القناة.\n"
-            f"تأكد من كتابة اسم الكتاب بشكل أقرب للعنوان الأصلي، أو حاول باسم مختصر أدق."
-        )
-        return
+        await send_book_results(update, context, final_books)
 
-    # حذف التكرار الحرفي أولاً
-    deduped = dedupe_exact(results)
-
-    # تجميع النتائج حسب السلسلة (الاسم الأساسي بدون رقم الجزء)
-    groups = group_into_series(deduped)
-
-    # نختار المجموعة الأكثر تطابقاً مع طلب المستخدم:
-    # إن كانت كل النتائج تنتمي لنفس السلسلة، نرسلها كاملة (كل الأجزاء).
-    # إن كانت هناك عدة كتب مختلفة مطابقة (بحث عام)، نرسل كل مجموعة على حدة.
-    final_books = []
-    for base_key, items in groups.items():
-        distinct_parts = {extract_part_number(b) for b, _, _ in items if extract_part_number(b) is not None}
-        if len(distinct_parts) >= 2:
-            # سلسلة متعددة الأجزاء: أرسل كل الأجزاء مرتبة
-            sorted_items = sorted(
-                items,
-                key=lambda x: (extract_part_number(x[0]) is None, extract_part_number(x[0]) or 0)
+    except Exception as e:
+        # أي خطأ غير متوقع يجب أن يصل للمستخدم كرسالة واضحة، وليس صمتاً تاماً
+        print(f"❌ خطأ في search_and_forward: {e}")
+        try:
+            await update.message.reply_text(
+                f"❌ حدث خطأ تقني أثناء البحث. حاول مجدداً، وإن تكرر أبلغ الأدمن.\n`{e}`",
+                parse_mode="Markdown"
             )
-            final_books.extend(sorted_items)
-        else:
-            # كتاب واحد فقط لهذه المجموعة: أرسل أول نسخة غير مكررة فقط
-            final_books.append(items[0])
-
-    await send_book_results(update, context, final_books)
+        except Exception:
+            pass
 
 
 async def post_init(application):
