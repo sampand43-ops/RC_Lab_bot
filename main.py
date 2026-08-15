@@ -4,6 +4,7 @@ import sqlite3
 import re
 import asyncio
 import difflib
+import urllib.request
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -15,6 +16,12 @@ from telegram.ext import (
     ContextTypes,
 )
 from pyrogram import Client as PyroClient
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+import arabic_reshaper
+from bidi.algorithm import get_display
 
 # مسار التخزين الدائم على Railway
 DATA_DIR = "/app/data"
@@ -22,6 +29,29 @@ if not os.path.exists(DATA_DIR):
     os.makedirs(DATA_DIR)
 
 DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
+
+# الخط العربي المطلوب لتصدير قائمة الكتب كـ PDF — يُحمَّل تلقائياً عند أول استخدام
+# ويُحفظ على القرص الدائم، لا حاجة لرفع أي ملف خط يدوياً للمستودع
+FONT_PATH = os.path.join(DATA_DIR, "NotoNaskhArabic-Regular.ttf")
+FONT_URL = "https://raw.githubusercontent.com/google/fonts/main/ofl/notonaskharabic/NotoNaskhArabic%5Bwght%5D.ttf"
+_font_registered = False
+
+
+def ensure_arabic_font():
+    """يحمّل الخط العربي عند الحاجة (مرة واحدة فقط) ويسجّله لدى reportlab"""
+    global _font_registered
+    if _font_registered:
+        return True
+    try:
+        if not os.path.exists(FONT_PATH):
+            urllib.request.urlretrieve(FONT_URL, FONT_PATH)
+        pdfmetrics.registerFont(TTFont("Arabic", FONT_PATH))
+        _font_registered = True
+        return True
+    except Exception as e:
+        print(f"⚠️ تعذّر تحميل/تسجيل الخط العربي: {e}")
+        return False
+
 
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 
@@ -574,6 +604,7 @@ def find_book_matches(norm_query, all_records):
 def build_admin_panel_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 إحصائيات الأرشيف", callback_data="admin_stats")],
+        [InlineKeyboardButton("📄 تصدير أسماء الكتب (PDF)", callback_data="admin_export_pdf")],
         [InlineKeyboardButton("🔢 حذف آخر عدد من الكتب", callback_data="admin_delete_count")],
         [InlineKeyboardButton("🗑️ حذف كامل الأرشيف", callback_data="admin_clear_all")],
     ])
@@ -590,6 +621,55 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
         parse_mode="Markdown",
         reply_markup=build_admin_panel_keyboard()
     )
+
+
+def generate_archive_pdf(output_path):
+    """
+    يُولّد ملف PDF يحتوي على كل أسماء الكتب المؤرشفة حالياً (اسم الكتاب + رقم الرسالة + المصدر)،
+    مرتبة أبجدياً، لأغراض المراجعة والتشخيص.
+    """
+    font_available = ensure_arabic_font()
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT book_name, msg_id, source_chat_id FROM archive ORDER BY book_name COLLATE NOCASE"
+    )
+    rows = cursor.fetchall()
+    conn.close()
+
+    c = canvas.Canvas(output_path, pagesize=A4)
+    width, height = A4
+    font_name = "Arabic" if font_available else "Helvetica"
+    font_size = 11
+    line_height = 16
+    margin_top = 40
+    margin_bottom = 40
+    y = height - margin_top
+
+    c.setFont(font_name, 14)
+    title = f"فهرس أرشيف الكتب — إجمالي: {len(rows)} كتاباً"
+    if font_available:
+        title = get_display(arabic_reshaper.reshape(title))
+    c.drawRightString(width - 40, y, title)
+    y -= line_height * 2
+
+    c.setFont(font_name, font_size)
+    for index, (book_name, msg_id, source_chat_id) in enumerate(rows, start=1):
+        line = f"{index}. {book_name}  [msg_id: {msg_id}]"
+        if font_available:
+            line = get_display(arabic_reshaper.reshape(line))
+
+        c.drawRightString(width - 40, y, line)
+        y -= line_height
+
+        if y < margin_bottom:
+            c.showPage()
+            c.setFont(font_name, font_size)
+            y = height - margin_top
+
+    c.save()
+    return len(rows)
 
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -648,6 +728,51 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(
             "✅ تم حذف كامل فهرس الأرشيف بنجاح.",
             reply_markup=keyboard
+        )
+
+    elif data == "admin_export_pdf":
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM archive")
+        total = cursor.fetchone()[0]
+        conn.close()
+
+        if total == 0:
+            await query.edit_message_text(
+                "⚠️ الأرشيف فارغ حالياً، لا يوجد ما يُصدَّر.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
+            )
+            return
+
+        await query.edit_message_text(f"⏳ جاري توليد ملف PDF لـ {total} كتاباً، الرجاء الانتظار...")
+
+        pdf_path = os.path.join(DATA_DIR, f"archive_export_{query.message.message_id}.pdf")
+        try:
+            # توليد PDF عملية تستهلك المعالج، تُنفَّذ في Thread منفصل حتى لا تُجمّد البوت أثناء التوليد
+            count = await asyncio.to_thread(generate_archive_pdf, pdf_path)
+
+            with open(pdf_path, "rb") as f:
+                await context.bot.send_document(
+                    chat_id=query.message.chat_id,
+                    document=f,
+                    filename="archive_books_list.pdf",
+                    caption=f"📄 فهرس الأرشيف الحالي — {count} كتاباً."
+                )
+        except Exception as e:
+            await context.bot.send_message(
+                chat_id=query.message.chat_id,
+                text=f"❌ حدث خطأ أثناء توليد الملف:\n`{e}`",
+                parse_mode="Markdown"
+            )
+        finally:
+            if os.path.exists(pdf_path):
+                os.remove(pdf_path)
+
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            text="⚙️ *لوحة تحكم الأرشيف*\n\nاختر أحد الخيارات:",
+            parse_mode="Markdown",
+            reply_markup=build_admin_panel_keyboard()
         )
 
     elif data == "admin_delete_count":
