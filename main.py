@@ -242,6 +242,17 @@ def dedupe_exact(records):
     return deduped
 
 
+def build_alternates_map(records):
+    """يبني خريطة (اسم مُطبَّع -> كل النسخ الممكنة له) من نتائج غير مُنقّاة من التكرار،
+    تُستخدم لإعادة المحاولة تلقائياً بنسخة بديلة إن فشلت النسخة الأساسية عند الإرسال
+    (مثلاً: رسالة محذوفة من القناة، بينما نسخة أخرى بنفس الاسم لا تزال موجودة)."""
+    alternates = defaultdict(list)
+    for book_name, msg_id, source_chat_id in records:
+        key = normalize_arabic(book_name)
+        alternates[key].append((msg_id, source_chat_id))
+    return alternates
+
+
 def group_into_series(records):
     groups = defaultdict(list)
     for book_name, msg_id, source_chat_id in records:
@@ -785,24 +796,42 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 # ==================== الإرسال والبحث ====================
 
-async def send_book_results(update, context, valid_books):
+async def send_book_results(update, context, valid_books, alternates_map=None):
     """يرسل الكتب مباشرة (نسخ بدون كابشن، دون إظهار 'محوّلة من القناة').
-    يُرجع (نجح, فشل) — قائمة الكتب التي نجح إرسالها وقائمة التي فشلت مع سبب الفشل،
-    حتى لا يختفي أي خطأ بصمت."""
+    إن فشل إرسال كتاب (مثلاً: الرسالة محذوفة من القناة)، يحاول تلقائياً مع أي
+    نسخة بديلة أخرى بنفس الاسم (alternates_map) قبل الاستسلام والإبلاغ بالفشل.
+    يُرجع (نجح, فشل) حتى لا يختفي أي خطأ بصمت."""
+    alternates_map = alternates_map or {}
     succeeded, failed = [], []
+
     for book_name, msg_id, source_chat_id in valid_books:
-        try:
-            await context.bot.copy_message(
-                chat_id=update.effective_chat.id,
-                from_chat_id=source_chat_id,
-                message_id=msg_id,
-                caption=""
-            )
-            succeeded.append(book_name)
-            await asyncio.sleep(0.4)
-        except Exception as e:
-            print(f"⚠️ فشل إرسال الكتاب '{book_name}' (msg_id={msg_id}, source={source_chat_id}): {e}")
-            failed.append((book_name, msg_id, str(e)))
+        key = normalize_arabic(book_name)
+        # كل النسخ الممكنة لهذا الاسم: المحاولة الأساسية أولاً، ثم أي بدائل أخرى لم تُجرَّب
+        candidates = [(msg_id, source_chat_id)]
+        for alt_msg_id, alt_source in alternates_map.get(key, []):
+            if (alt_msg_id, alt_source) not in candidates:
+                candidates.append((alt_msg_id, alt_source))
+
+        last_error = None
+        sent = False
+        for attempt_msg_id, attempt_source in candidates:
+            try:
+                await context.bot.copy_message(
+                    chat_id=update.effective_chat.id,
+                    from_chat_id=attempt_source,
+                    message_id=attempt_msg_id,
+                    caption=""
+                )
+                succeeded.append(book_name)
+                sent = True
+                await asyncio.sleep(0.4)
+                break
+            except Exception as e:
+                last_error = e
+                print(f"⚠️ محاولة فاشلة لـ '{book_name}' (msg_id={attempt_msg_id}, source={attempt_source}): {e}")
+
+        if not sent:
+            failed.append((book_name, msg_id, str(last_error)))
 
     if failed:
         chat_type = update.effective_chat.type
@@ -810,7 +839,7 @@ async def send_book_results(update, context, valid_books):
         if chat_type == 'private' and user_id in ADMIN_IDS:
             # تفاصيل كاملة للأدمن في الخاص فقط، لتشخيص السبب بدقة
             # بدون Markdown: أسماء الكتب الحقيقية شبه دائماً تحتوي رموزاً تكسر التنسيق
-            lines = [f"⚠️ تعذّر إرسال {len(failed)} كتاب/كتب من أصل {len(valid_books)}:"]
+            lines = [f"⚠️ تعذّر إرسال {len(failed)} كتاب/كتب من أصل {len(valid_books)} (حتى بعد تجربة كل النسخ البديلة المتاحة):"]
             for book_name, msg_id, err in failed:
                 lines.append(f"• {book_name} (msg_id: {msg_id})\n   السبب: {err}")
             try:
@@ -957,7 +986,8 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if not results:
                 await update.message.reply_text(f"❌ لم يتم العثور على أي كتب باسم الكاتب ('{author_query}').")
                 return
-            await send_book_results(update, context, dedupe_exact(results))
+            alternates_map = build_alternates_map(results)
+            await send_book_results(update, context, dedupe_exact(results), alternates_map)
             return
 
         results = await asyncio.to_thread(
@@ -971,6 +1001,10 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             return
 
+        # خريطة النسخ البديلة (قبل حذف التكرار) — تُستخدم لإعادة المحاولة تلقائياً
+        # إن فشل إرسال نسخة معيّنة (مثلاً: رسالتها محذوفة من القناة)
+        alternates_map = build_alternates_map(results)
+
         deduped = dedupe_exact(results)
         groups = group_into_series(deduped)
 
@@ -979,11 +1013,21 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             distinct_parts = {extract_part_number(b) for b, _, _ in items if extract_part_number(b) is not None}
             if len(distinct_parts) >= 2:
                 sorted_items = sorted(items, key=lambda x: (extract_part_number(x[0]) is None, extract_part_number(x[0]) or 0))
-                final_books.extend(sorted_items)
+                # إزالة تكرار رقم الجزء نفسه (مثال: جزء 1 مرفوع مرتين بصيغتين مختلفتين قليلاً)
+                # نُبقي أول نسخة فقط لكل رقم جزء فريد
+                seen_parts = set()
+                unique_parts = []
+                for item in sorted_items:
+                    part_num = extract_part_number(item[0])
+                    if part_num in seen_parts:
+                        continue
+                    seen_parts.add(part_num)
+                    unique_parts.append(item)
+                final_books.extend(unique_parts)
             else:
                 final_books.append(items[0])
 
-        await send_book_results(update, context, final_books)
+        await send_book_results(update, context, final_books, alternates_map)
 
     except Exception as e:
         print(f"❌ خطأ في search_and_forward: {e}")
