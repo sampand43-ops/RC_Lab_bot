@@ -210,6 +210,19 @@ def get_words(normalized_text):
     return [w for w in normalized_text.split() if len(w) >= 2]
 
 
+EXTENSION_ONLY_PATTERN = re.compile(r'\.(pdf|epub|zip|mobi|docx?|rar|txt)$', re.IGNORECASE)
+
+
+def strip_extension_only(filename):
+    """يحذف امتداد الملف فقط (.pdf مثلاً) دون لمس أي رقم أو نص آخر في الاسم.
+    يُستخدم حصراً لحساب 'التطابق التام' الحقيقي، لأن ترك الامتداد ملتصقاً
+    (كـ 'فن حرب pdf' بدل 'فن حرب') كان يمنع أي تطابق تام من الأساس،
+    ويدفع كل طلب للاعتماد على مرحلة 'يبدأ بـ' الأوسع فيرسل كل الإصدارات المشابهة معاً."""
+    if not filename:
+        return ""
+    return EXTENSION_ONLY_PATTERN.sub('', filename).strip()
+
+
 AUTHOR_REQUEST_PATTERNS = [
     re.compile(r'^(?:اريد|أريد)\s+(?:كل|جميع)\s+كتب\s+(.+)$'),
     re.compile(r'^(?:كل|جميع)\s+كتب\s+(.+)$'),
@@ -239,15 +252,16 @@ def group_into_series(records):
 
 # ==================== فهرس البحث المُخزَّن مؤقتاً ====================
 
-_search_index_cache = {"fingerprint": None, "records": [], "norm_names": [], "index": {}}
+_search_index_cache = {"fingerprint": None, "records": [], "norm_names": [], "norm_names_no_ext": [], "index": {}}
 
 
 def get_search_index():
-    """يُرجع (records, norm_names, index)، ويعيد البناء تلقائياً فقط عند تغيّر الأرشيف فعلياً.
-    مهم جداً: norm_names هو الاسم الكامل بعد التطبيع فقط (بدون حذف أي رقم من نهايته)،
-    تماماً كالنسخة الأصلية المضمونة — لأن حذف رقم الجزء عند المطابقة نفسها (وليس فقط
-    عند تجميع الأجزاء لاحقاً) كان يسبب تطابق كتب مختلفة تماماً بالخطأ إذا تشابه
-    الجزء المتبقي من أسمائها بالصدفة بعد حذف الرقم."""
+    """يُرجع (records, norm_names, norm_names_no_ext, index)، ويعيد البناء تلقائياً فقط عند تغيّر الأرشيف.
+    - norm_names: الاسم الكامل بعد التطبيع (بما فيه الامتداد كـ'pdf')، يُستخدم في مراحل
+      'يبدأ بـ' و'كل الكلمات' و'التقريبي' — ثبت أنها آمنة وموثوقة (كالكود الأصلي المضمون).
+    - norm_names_no_ext: نفس الاسم لكن بعد حذف الامتداد فقط (.pdf) دون لمس أي رقم،
+      يُستخدم حصراً في مرحلة 'التطابق التام' — لأن ترك الامتداد كان يمنع أي تطابق تام
+      من الأصل ويدفع كل طلب لمرحلة أوسع تُرسل كل الإصدارات المشابهة معاً بدل الدقيق منها."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM archive")
@@ -255,7 +269,10 @@ def get_search_index():
 
     if _search_index_cache["fingerprint"] == fingerprint:
         conn.close()
-        return _search_index_cache["records"], _search_index_cache["norm_names"], _search_index_cache["index"]
+        return (
+            _search_index_cache["records"], _search_index_cache["norm_names"],
+            _search_index_cache["norm_names_no_ext"], _search_index_cache["index"]
+        )
 
     cursor.execute("SELECT book_name, msg_id, source_chat_id FROM archive GROUP BY msg_id, source_chat_id")
     raw_records = cursor.fetchall()
@@ -263,7 +280,7 @@ def get_search_index():
 
     norm_forbidden = [normalize_arabic(p) for p in FORBIDDEN_PREFIXES]
 
-    records, norm_names = [], []
+    records, norm_names, norm_names_no_ext = [], [], []
     index = defaultdict(set)
 
     for book_name, msg_id, source_chat_id in raw_records:
@@ -274,24 +291,28 @@ def get_search_index():
         i = len(records)
         records.append((book_name, msg_id, source_chat_id))
         norm_names.append(norm_name)
+        norm_names_no_ext.append(normalize_arabic(strip_extension_only(book_name)))
         for w in get_words(norm_name):
             index[w].add(i)
 
-    _search_index_cache.update(fingerprint=fingerprint, records=records, norm_names=norm_names, index=index)
-    return records, norm_names, index
+    _search_index_cache.update(
+        fingerprint=fingerprint, records=records, norm_names=norm_names,
+        norm_names_no_ext=norm_names_no_ext, index=index
+    )
+    return records, norm_names, norm_names_no_ext, index
 
 
-def find_book_matches_indexed(norm_query, records, norm_names, index):
+def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext, index):
     """
-    بحث دقيق بأولويات صارمة — كلها على الاسم الكامل بعد التطبيع (بدون حذف رقم الجزء):
-    1) تطابق تام كامل للاسم
-    2) (كلمتان فأكثر) الاسم يبدأ بنص الطلب بالكامل
+    بحث دقيق بأولويات صارمة:
+    1) تطابق تام كامل للاسم (بعد حذف الامتداد فقط .pdf — وليس رقم الجزء)
+    2) (كلمتان فأكثر) الاسم الكامل (بامتداده) يبدأ بنص الطلب بالكامل
     3) (كلمتان فأكثر) كل كلمات الطلب موجودة كاملة (عبر الفهرس)
     4) (كلمتان فأكثر، وكل كلمة 3 أحرف فأكثر) تطابق تقريبي صارم (85%+)
     """
     query_words = get_words(norm_query)
 
-    exact = [records[i] for i, nn in enumerate(norm_names) if nn == norm_query]
+    exact = [records[i] for i, nn in enumerate(norm_names_no_ext) if nn == norm_query]
     if exact:
         print(f"🔎 SEARCH[{norm_query!r}] -> STAGE1(exact) -> {[r[0] for r in exact]}")
         return exact
@@ -929,7 +950,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        records, norm_names, index = await asyncio.to_thread(get_search_index)
+        records, norm_names, norm_names_no_ext, index = await asyncio.to_thread(get_search_index)
 
         if is_author_request:
             results = [records[i] for i, nn in enumerate(norm_names) if norm_query in nn]
@@ -939,7 +960,9 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await send_book_results(update, context, dedupe_exact(results))
             return
 
-        results = await asyncio.to_thread(find_book_matches_indexed, norm_query, records, norm_names, index)
+        results = await asyncio.to_thread(
+            find_book_matches_indexed, norm_query, records, norm_names, norm_names_no_ext, index
+        )
 
         if not results:
             await update.message.reply_text(
