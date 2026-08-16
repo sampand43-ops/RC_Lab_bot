@@ -788,10 +788,14 @@ async def send_book_results(update, context, valid_books):
         user_id = update.effective_user.id
         if chat_type == 'private' and user_id in ADMIN_IDS:
             # تفاصيل كاملة للأدمن في الخاص فقط، لتشخيص السبب بدقة
+            # بدون Markdown: أسماء الكتب الحقيقية شبه دائماً تحتوي رموزاً تكسر التنسيق
             lines = [f"⚠️ تعذّر إرسال {len(failed)} كتاب/كتب من أصل {len(valid_books)}:"]
             for book_name, msg_id, err in failed:
-                lines.append(f"• `{book_name}` (msg_id: `{msg_id}`)\n   السبب: {err}")
-            await update.message.reply_text("\n".join(lines), parse_mode="Markdown")
+                lines.append(f"• {book_name} (msg_id: {msg_id})\n   السبب: {err}")
+            try:
+                await update.message.reply_text("\n".join(lines))
+            except Exception as e:
+                print(f"❌ فشل حتى إرسال تقرير الخطأ نفسه: {e}")
         elif not succeeded:
             # لم ينجح أي كتاب إطلاقاً — يجب أن يعرف طالب الكتاب أن هناك خطأ فعلياً
             await update.message.reply_text(
@@ -813,46 +817,61 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     # --- استقبال عدد الحذف (من لوحة التحكم) ---
     if chat_type == 'private' and user_id in ADMIN_IDS and context.user_data.get('awaiting_delete_count'):
         context.user_data.pop('awaiting_delete_count', None)
-        if text.isdigit() and int(text) > 0:
-            n = int(text)
-            conn = sqlite3.connect(DB_PATH)
-            cursor = conn.cursor()
-            cursor.execute("SELECT id FROM archive ORDER BY id DESC LIMIT ?", (n,))
-            ids_to_delete = [row[0] for row in cursor.fetchall()]
-            if ids_to_delete:
-                cursor.executemany("DELETE FROM archive WHERE id = ?", [(i,) for i in ids_to_delete])
-                conn.commit()
-            conn.close()
-            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
-            await update.message.reply_text(
-                f"✅ تم حذف `{len(ids_to_delete)}` كتاباً.", parse_mode="Markdown", reply_markup=keyboard
-            )
-        else:
-            await update.message.reply_text("⚠️ أرسل رقماً صحيحاً فقط (مثال: 50).")
+        try:
+            if text.isdigit() and int(text) > 0:
+                n = int(text)
+                conn = sqlite3.connect(DB_PATH)
+                cursor = conn.cursor()
+                cursor.execute("SELECT id FROM archive ORDER BY id DESC LIMIT ?", (n,))
+                ids_to_delete = [row[0] for row in cursor.fetchall()]
+                if ids_to_delete:
+                    cursor.executemany("DELETE FROM archive WHERE id = ?", [(i,) for i in ids_to_delete])
+                    conn.commit()
+                conn.close()
+                keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
+                await update.message.reply_text(f"✅ تم حذف {len(ids_to_delete)} كتاباً.", reply_markup=keyboard)
+            else:
+                await update.message.reply_text("⚠️ أرسل رقماً صحيحاً فقط (مثال: 50).")
+        except Exception as e:
+            print(f"❌ خطأ في حذف العدد: {e}")
+            try:
+                await update.message.reply_text(f"❌ حدث خطأ أثناء الحذف: {e}")
+            except Exception:
+                pass
         return
 
     # --- استقبال كلمة البحث الخام (من لوحة التحكم) ---
     if chat_type == 'private' and user_id in ADMIN_IDS and context.user_data.get('awaiting_raw_search'):
         context.user_data.pop('awaiting_raw_search', None)
-        conn = sqlite3.connect(DB_PATH)
-        cursor = conn.cursor()
-        cursor.execute("SELECT book_name, msg_id, source_chat_id FROM archive WHERE book_name LIKE ? LIMIT 30", (f"%{text}%",))
-        raw_rows = cursor.fetchall()
-        cursor.execute("SELECT COUNT(*) FROM archive WHERE book_name LIKE ?", (f"%{text}%",))
-        total_matches = cursor.fetchone()[0]
-        conn.close()
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT book_name, msg_id, source_chat_id FROM archive WHERE book_name LIKE ? LIMIT 30", (f"%{text}%",))
+            raw_rows = cursor.fetchall()
+            cursor.execute("SELECT COUNT(*) FROM archive WHERE book_name LIKE ?", (f"%{text}%",))
+            total_matches = cursor.fetchone()[0]
+            conn.close()
 
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
-        if not raw_rows:
-            await update.message.reply_text(f"🔎 لا توجد أي نتيجة تحتوي ('{text}') في القاعدة.", reply_markup=keyboard)
-        else:
-            lines = [f"🔎 نتائج ('{text}') — الإجمالي: {total_matches}\n"]
-            for book_name, msg_id, source_chat_id in raw_rows:
-                lines.append(f"• `{book_name}`\n   msg_id: `{msg_id}` | المصدر: `{source_chat_id}`")
-            msg_text = "\n".join(lines)
-            if len(msg_text) > 3900:
-                msg_text = msg_text[:3900] + "\n\n... (تم الاقتصاص)"
-            await update.message.reply_text(msg_text, parse_mode="Markdown", reply_markup=keyboard)
+            keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
+            if not raw_rows:
+                # بدون parse_mode إطلاقاً هنا: النص المُدخل من المستخدم قد يحتوي رموز Markdown خاصة
+                await update.message.reply_text(f"🔎 لا توجد أي نتيجة تحتوي ('{text}') في القاعدة.", reply_markup=keyboard)
+            else:
+                # بدون Markdown نهائياً: أسماء الملفات الحقيقية شبه دائماً تحتوي على _  * [ ] وغيرها
+                # مما يكسر تنسيق Markdown ويجعل تيليجرام يرفض الرسالة بالكامل بصمت
+                lines = [f"🔎 نتائج ({text}) — الإجمالي: {total_matches}\n"]
+                for book_name, msg_id, source_chat_id in raw_rows:
+                    lines.append(f"• {book_name}\n   msg_id: {msg_id} | المصدر: {source_chat_id}")
+                msg_text = "\n".join(lines)
+                if len(msg_text) > 3900:
+                    msg_text = msg_text[:3900] + "\n\n... (تم الاقتصاص)"
+                await update.message.reply_text(msg_text, reply_markup=keyboard)
+        except Exception as e:
+            print(f"❌ خطأ في البحث الخام: {e}")
+            try:
+                await update.message.reply_text(f"❌ حدث خطأ أثناء البحث: {e}")
+            except Exception:
+                pass
         return
 
     if text.startswith('/'):
