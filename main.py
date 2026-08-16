@@ -56,6 +56,9 @@ def ensure_arabic_font():
 
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 
+# علامة إصدار الكود — تظهر في /panel وفي رسائل الأرشفة، للتأكد القاطع من نشر آخر نسخة فعلياً
+CODE_VERSION = "v4-indexed-search-2026-08-15"
+
 # بيانات API لحساب المستخدم (Userbot) المستخدم في البحث الحي داخل القناة
 API_ID = 34123643
 API_HASH = "12dccc6e1dce1c82853587ba04e9694d"
@@ -378,7 +381,7 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
         os.remove(json_path)
 
         await status_msg.edit_text(
-            f"✅ تمت الأرشفة بنجاح!\n"
+            f"✅ تمت الأرشفة بنجاح! (إصدار الكود: `{CODE_VERSION}`)\n"
             f"عدد الرسائل المفحوصة في هذا الملف: `{total_msgs}`\n"
             f"إجمالي الكتب المؤرشفة الآن لهذا المصدر: `{final_count}`\n\n"
             f"💡 إذا كان لديك أجزاء أخرى من نفس المكتبة، أرسلها الآن واحداً تلو الآخر."
@@ -464,7 +467,7 @@ PART_PATTERN = re.compile(
     r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)',
     re.IGNORECASE
 )
-TRAILING_NUM_PATTERN = re.compile(r'[\s\-_]([0-9٠-٩]+)\s*(?:\.pdf|\.epub|\.zip)?$')
+TRAILING_NUM_PATTERN = re.compile(r'[\s\-_]([0-9٠-٩])\s*(?:\.pdf|\.epub|\.zip)?$')
 
 
 def extract_part_number(filename):
@@ -609,7 +612,7 @@ def find_book_matches_indexed(norm_query, records, base_keys, index):
     1) تطابق تام كامل للاسم (بعد حذف الامتداد ورقم الجزء)
     2) (فقط للطلبات متعددة الكلمات) الاسم يبدأ بنص الطلب بالكامل
     3) (فقط للطلبات متعددة الكلمات) كل كلمات الطلب موجودة كاملة — عبر الفهرس مباشرة (سريع جداً)
-    4) (فقط للطلبات متعددة الكلمات) تطابق تقريبي، محسوب فقط على مفردات الفهرس (وليس كل السجلات)
+    4) (فقط للطلبات متعددة الكلمات، وكل كلمة 3 أحرف فأكثر) تطابق تقريبي صارم (تشابه 85%+)
     الطلبات المكوّنة من كلمة واحدة فقط تُقبل حصراً عند التطابق التام.
     """
     query_words = get_words(norm_query)
@@ -617,14 +620,17 @@ def find_book_matches_indexed(norm_query, records, base_keys, index):
     # 1) تطابق تام
     exact = [records[i] for i, bk in enumerate(base_keys) if bk == norm_query]
     if exact:
+        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE 1 (exact) -> {[r[0] for r in exact]}")
         return exact
 
     if len(query_words) < 2:
+        print(f"🔎 SEARCH[{norm_query!r}] -> كلمة واحدة بدون تطابق تام -> لا نتائج")
         return []
 
     # 2) الاسم يبدأ بنص الطلب بالكامل (مقارنة نصية بسيطة، سريعة حتى مع مئات الآلاف من السجلات)
     startswith_matches = [records[i] for i, bk in enumerate(base_keys) if bk.startswith(norm_query)]
     if startswith_matches:
+        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE 2 (startswith) -> {[r[0] for r in startswith_matches]}")
         return startswith_matches
 
     # 3) كل كلمات الطلب موجودة كاملة — عبر تقاطع مجموعات الفهرس مباشرة (O(1) لكل كلمة تقريباً)
@@ -632,14 +638,22 @@ def find_book_matches_indexed(norm_query, records, base_keys, index):
     if all(word_sets):
         common = set.intersection(*word_sets)
         if common:
-            return [records[i] for i in common]
+            result = [records[i] for i in common]
+            print(f"🔎 SEARCH[{norm_query!r}] -> STAGE 3 (كل الكلمات موجودة) -> {[r[0] for r in result]}")
+            return result
 
-    # 4) تطابق تقريبي (أخطاء إملائية بسيطة) — يُحسب فقط على مفردات الفهرس، وليس كل السجلات
+    # 4) تطابق تقريبي صارم — يُستبعد تماماً إن كانت أي كلمة من الطلب أقصر من 3 أحرف
+    # (كلمات قصيرة مثل "فن" خطيرة جداً في المطابقة التقريبية وتسبب نتائج غير منطقية)
+    if any(len(qw) < 3 for qw in query_words):
+        print(f"🔎 SEARCH[{norm_query!r}] -> تجاهل المرحلة التقريبية (كلمة قصيرة جداً) -> لا نتائج")
+        return []
+
     vocabulary = list(index.keys())
     per_word_candidates = []
     for qw in query_words:
-        close_words = difflib.get_close_matches(qw, vocabulary, n=5, cutoff=0.8)
+        close_words = difflib.get_close_matches(qw, vocabulary, n=5, cutoff=0.85)
         if not close_words:
+            print(f"🔎 SEARCH[{norm_query!r}] -> STAGE 4: لا تشابه كافٍ للكلمة '{qw}' -> لا نتائج")
             return []
         word_candidates = set()
         for w in close_words:
@@ -647,13 +661,16 @@ def find_book_matches_indexed(norm_query, records, base_keys, index):
         per_word_candidates.append(word_candidates)
 
     common = set.intersection(*per_word_candidates) if per_word_candidates else set()
-    return [records[i] for i in common]
+    result = [records[i] for i in common]
+    print(f"🔎 SEARCH[{norm_query!r}] -> STAGE 4 (تقريبي صارم) -> {[r[0] for r in result]}")
+    return result
 
 
 def build_admin_panel_keyboard():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 إحصائيات الأرشيف", callback_data="admin_stats")],
         [InlineKeyboardButton("📄 تصدير أسماء الكتب (PDF)", callback_data="admin_export_pdf")],
+        [InlineKeyboardButton("🔎 بحث خام (تشخيص)", callback_data="admin_raw_search")],
         [InlineKeyboardButton("🔢 حذف آخر عدد من الكتب", callback_data="admin_delete_count")],
         [InlineKeyboardButton("🗑️ حذف كامل الأرشيف", callback_data="admin_clear_all")],
     ])
@@ -744,7 +761,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         by_source = cursor.fetchall()
         conn.close()
 
-        text = f"📊 *إحصائيات الأرشيف*\n\nإجمالي الكتب المؤرشفة: `{total}`\n\n*حسب المصدر:*\n"
+        text = f"📊 *إحصائيات الأرشيف*\n\nإصدار الكود: `{CODE_VERSION}`\nإجمالي الكتب المؤرشفة: `{total}`\n\n*حسب المصدر:*\n"
         for chat_id, count in by_source:
             label = "📚 القناة الرئيسية" if chat_id == CHANNEL_ID else f"👥 كروب ({chat_id})"
             text += f"• {label}: `{count}`\n"
@@ -835,8 +852,23 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             reply_markup=keyboard
         )
 
+    elif data == "admin_raw_search":
+        context.user_data['awaiting_raw_search'] = True
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data="admin_back")]])
+        await query.edit_message_text(
+            "🔎 *بحث خام (تشخيصي)*\n\n"
+            "أرسل الآن أي كلمة أو جزءاً من اسم كتاب.\n"
+            "سيتم البحث *مباشرة* في قاعدة البيانات بدون أي منطق ذكي "
+            "(بحث نصي خام SQL LIKE)، وستظهر لك كل النتائج المطابقة "
+            "مع أرقام رسائلها بالضبط كما هي مخزّنة.\n\n"
+            "مفيد للتأكد من وجود كتاب معين فعلياً في الأرشيف.",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+
     elif data == "admin_back":
         context.user_data.pop('awaiting_delete_count', None)
+        context.user_data.pop('awaiting_raw_search', None)
         await query.edit_message_text(
             "⚙️ *لوحة تحكم الأرشيف*\n\nاختر أحد الخيارات:",
             parse_mode="Markdown",
@@ -916,6 +948,41 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
         else:
             await update.message.reply_text("⚠️ الرجاء إرسال رقم صحيح فقط (مثال: 50).")
+        return
+
+    # معالجة إدخال كلمة البحث الخام إن كان الأدمن قد اختار "بحث خام" من لوحة التحكم
+    if chat_type == 'private' and user_id in ADMIN_IDS and context.user_data.get('awaiting_raw_search'):
+        context.user_data.pop('awaiting_raw_search', None)
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT book_name, msg_id, source_chat_id FROM archive WHERE book_name LIKE ? LIMIT 30",
+            (f"%{text}%",)
+        )
+        raw_rows = cursor.fetchall()
+        cursor.execute(
+            "SELECT COUNT(*) FROM archive WHERE book_name LIKE ?",
+            (f"%{text}%",)
+        )
+        total_matches = cursor.fetchone()[0]
+        conn.close()
+
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع للوحة التحكم", callback_data="admin_back")]])
+
+        if not raw_rows:
+            await update.message.reply_text(
+                f"🔎 لا توجد أي نتيجة تحتوي على النص ('{text}') في قاعدة البيانات إطلاقاً.",
+                reply_markup=keyboard
+            )
+        else:
+            lines = [f"🔎 نتائج البحث الخام عن ('{text}') — الإجمالي: {total_matches}\n"]
+            for book_name, msg_id, source_chat_id in raw_rows:
+                lines.append(f"• `{book_name}`\n   msg_id: `{msg_id}` | المصدر: `{source_chat_id}`")
+            message_text = "\n".join(lines)
+            if len(message_text) > 3900:
+                message_text = message_text[:3900] + "\n\n... (تم اقتصاص القائمة، النتائج كثيرة)"
+            await update.message.reply_text(message_text, parse_mode="Markdown", reply_markup=keyboard)
         return
 
     if text.startswith('/'):
@@ -1091,6 +1158,9 @@ async def post_shutdown(application):
 
 
 def main():
+    print("=" * 60)
+    print("🔖 BOT_CODE_VERSION: 2026-08-15-v4-indexed-search-strict")
+    print("=" * 60)
     init_db()
     migrate_db()
 
@@ -1127,7 +1197,7 @@ def main():
         search_and_forward
     ))
 
-    print("البوت جاهز ويعمل مع المشرفين المعتمدين...")
+    print(f"البوت جاهز ويعمل مع المشرفين المعتمدين... [إصدار الكود: {CODE_VERSION}]")
     application.run_polling()
 
 
