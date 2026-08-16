@@ -1,6 +1,4 @@
-python-telegram-bot 
-reportlab 
-arabic-reshaper 
-python-bidi 
-pyrogram 
-tgcrypto
+python-telegram-bot
+reportlab
+arabic-reshaper
+python-bidi
