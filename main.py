@@ -582,6 +582,7 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def generate_archive_pdf(output_path):
+    import unicodedata
     from reportlab.lib.pagesizes import A4
     from reportlab.pdfgen import canvas
 
@@ -589,6 +590,20 @@ def generate_archive_pdf(output_path):
     if font_available:
         import arabic_reshaper
         from bidi.algorithm import get_display
+
+    def safe_display(raw_text):
+        """يجهّز النص للعرض العربي، ويزيل أي أحرف تحكّم خفية قد يرفضها الخط،
+        ويتراجع تلقائياً للنص الخام إن فشلت المعالجة بالكامل لأي سبب."""
+        if not font_available:
+            return raw_text
+        try:
+            shaped = get_display(arabic_reshaper.reshape(raw_text))
+            # إزالة أي أحرف تحكّم يونيكود خفية (فئة Cf) لا يملك الخط رمزاً مرئياً لها
+            cleaned = ''.join(ch for ch in shaped if unicodedata.category(ch) != 'Cf')
+            return cleaned
+        except Exception:
+            # كحل أخير: احذف أي حرف خارج النطاق الأساسي بدل إسقاط السطر بالكامل
+            return ''.join(ch for ch in raw_text if ord(ch) < 0x10000)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -603,18 +618,27 @@ def generate_archive_pdf(output_path):
     y = height - margin_top
 
     c.setFont(font_name, 14)
-    title = f"فهرس أرشيف الكتب — إجمالي: {len(rows)} كتاباً"
-    if font_available:
-        title = get_display(arabic_reshaper.reshape(title))
-    c.drawRightString(width - 40, y, title)
+    title = safe_display(f"فهرس أرشيف الكتب — إجمالي: {len(rows)} كتاباً")
+    try:
+        c.drawRightString(width - 40, y, title)
+    except Exception:
+        pass
     y -= line_height * 2
 
     c.setFont(font_name, 11)
+    skipped = 0
     for index, (book_name, msg_id, source_chat_id) in enumerate(rows, start=1):
-        line = f"{index}. {book_name}  [msg_id: {msg_id}]"
-        if font_available:
-            line = get_display(arabic_reshaper.reshape(line))
-        c.drawRightString(width - 40, y, line)
+        raw_line = f"{index}. {book_name}  [msg_id: {msg_id}]"
+        line = safe_display(raw_line)
+        try:
+            c.drawRightString(width - 40, y, line)
+        except Exception:
+            # سطر واحد فشل بسبب رمز غريب في اسم الملف — تخطَّه ولا توقف العملية كلها
+            skipped += 1
+            try:
+                c.drawRightString(width - 40, y, f"{index}. [تعذّر عرض هذا الاسم] [msg_id: {msg_id}]")
+            except Exception:
+                pass
         y -= line_height
         if y < margin_bottom:
             c.showPage()
@@ -622,7 +646,7 @@ def generate_archive_pdf(output_path):
             y = height - margin_top
 
     c.save()
-    return len(rows)
+    return len(rows), skipped
 
 
 async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -689,11 +713,14 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         await query.edit_message_text(f"⏳ جاري توليد PDF لـ {total} كتاباً...")
         pdf_path = os.path.join(DATA_DIR, f"archive_export_{query.message.message_id}.pdf")
         try:
-            count = await asyncio.to_thread(generate_archive_pdf, pdf_path)
+            count, skipped = await asyncio.to_thread(generate_archive_pdf, pdf_path)
+            caption = f"📄 فهرس الأرشيف — {count} كتاباً."
+            if skipped:
+                caption += f"\n⚠️ تعذّر عرض {skipped} اسماً بسبب رموز غير مدعومة فيها (لا يزال رقم رسالتها ظاهراً)."
             with open(pdf_path, "rb") as f:
                 await context.bot.send_document(
                     chat_id=query.message.chat_id, document=f,
-                    filename="archive_books_list.pdf", caption=f"📄 فهرس الأرشيف — {count} كتاباً."
+                    filename="archive_books_list.pdf", caption=caption
                 )
         except Exception as e:
             await context.bot.send_message(query.message.chat_id, f"❌ خطأ أثناء التوليد:\n`{e}`", parse_mode="Markdown")
