@@ -1038,7 +1038,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         norm_query = normalize_arabic(author_query)
     else:
         phrases_to_remove = sorted([
-            "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
+            "اريد كتاب", "أريد كتاب","ابغى", "اريد كتاب ال", "أريد كتاب ال",
             "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب",
             "اريد", "أريد", "كتاب", "رواية"
         ], key=len, reverse=True)
