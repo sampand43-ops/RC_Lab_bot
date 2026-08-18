@@ -4,6 +4,7 @@ import sqlite3
 import re
 import asyncio
 import difflib
+import random
 import urllib.request
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -224,8 +225,8 @@ def strip_extension_only(filename):
 
 
 AUTHOR_REQUEST_PATTERNS = [
-    re.compile(r'^(?:اريد|أريد)\s+(?:كل|جميع)\s+كتب\s+(.+)$'),
-    re.compile(r'^(?:كل|جميع)\s+كتب\s+(.+)$'),
+    re.compile(r'^(?:اريد|أريد)\s+(?:كل|جميع)\s+(?:كتب|مؤلفات)\s+(.+)$'),
+    re.compile(r'^(?:كل|جميع)\s+(?:كتب|مؤلفات)\s+(.+)$'),
 ]
 FORBIDDEN_PREFIXES = ["صور من", "قصص من", "مختصر", "شرح"]
 
@@ -250,6 +251,33 @@ def build_alternates_map(records):
     for book_name, msg_id, source_chat_id in records:
         key = normalize_arabic(book_name)
         alternates[key].append((msg_id, source_chat_id))
+    return alternates
+
+
+CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s*[-–]\s+')
+
+
+def get_core_title(raw_book_name):
+    """يستخرج 'العنوان الجوهري' بحذف كل ما بعد أول شرطة (يليها مسافة)، ثم يحذف الامتداد،
+    ثم يُطبِّع الناتج. يجب استدعاؤها على الاسم الخام (قبل normalize_arabic)، لأن التطبيع
+    يحذف الشرطة نفسها فتفقد إمكانية العثور عليها.
+    مثال: 'احببت وغدا - عماد رشاد.pdf' -> 'احببت وغدا'.
+    يُستخدم فقط كطبقة احتياطية أخيرة لإعادة المحاولة عند الفشل — وليس للمطابقة
+    الأساسية — حتى لا يختلط كتابان مختلفان فعلياً بنفس العنوان الأساسي (مثل
+    'فن الحرب' و'فن الحرب - نيكولاس ميكيافيلي' اللذين يُعاملان كنسختين مختلفتين
+    عمداً عند الاختيار الأول، لكن كبدائل إعادة محاولة أخيرة هذا مقبول)."""
+    core_raw = CORE_TITLE_SPLIT_PATTERN.split(raw_book_name, maxsplit=1)[0].strip()
+    core_raw = strip_extension_only(core_raw)
+    return normalize_arabic(core_raw)
+
+
+def build_core_alternates_map(records):
+    """خريطة بدائل أوسع مبنية على العنوان الجوهري (بدون اسم المؤلف/الوصف الإضافي)،
+    تُستخدم كطبقة أخيرة لإعادة المحاولة بعد استنفاد البدائل الدقيقة (نفس الاسم تماماً)."""
+    alternates = defaultdict(list)
+    for book_name, msg_id, source_chat_id in records:
+        core = get_core_title(book_name)
+        alternates[core].append((msg_id, source_chat_id))
     return alternates
 
 
@@ -346,19 +374,29 @@ def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext
             return result
 
     if any(len(qw) < 3 for qw in query_words):
-        print(f"🔎 SEARCH[{norm_query!r}] -> تجاهل التقريبي (كلمة قصيرة) -> فارغ")
-        return []
+        print(f"🔎 SEARCH[{norm_query!r}] -> كلمة قصيرة موجودة، تشابه أكثر صرامة (90%)")
+        cutoff = 0.9
+    else:
+        cutoff = 0.85
 
     vocabulary = list(index.keys())
     per_word_candidates = []
     for qw in query_words:
-        close_words = difflib.get_close_matches(qw, vocabulary, n=5, cutoff=0.85)
-        if not close_words:
-            print(f"🔎 SEARCH[{norm_query!r}] -> لا تشابه لكلمة '{qw}' -> فارغ")
-            return []
-        word_candidates = set()
-        for w in close_words:
-            word_candidates |= index.get(w, set())
+        # الكلمات القصيرة جداً (أقل من 3 أحرف) لا تخضع للتقريب إطلاقاً — يجب أن تُطابق بحروفها بالضبط
+        # (منع مشاكل مثل مطابقة "فن" مع كلمات أخرى قصيرة غير مرتبطة إطلاقاً)
+        if len(qw) < 3:
+            if qw not in index:
+                print(f"🔎 SEARCH[{norm_query!r}] -> كلمة قصيرة '{qw}' غير موجودة حرفياً -> فارغ")
+                return []
+            word_candidates = set(index[qw])
+        else:
+            close_words = difflib.get_close_matches(qw, vocabulary, n=5, cutoff=cutoff)
+            if not close_words:
+                print(f"🔎 SEARCH[{norm_query!r}] -> لا تشابه لكلمة '{qw}' -> فارغ")
+                return []
+            word_candidates = set()
+            for w in close_words:
+                word_candidates |= index.get(w, set())
         per_word_candidates.append(word_candidates)
 
     common = set.intersection(*per_word_candidates) if per_word_candidates else set()
@@ -454,8 +492,11 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (book_name, message.message_id, chat.id)
         )
         conn.commit()
+        print(f"✅ أُرشف تلقائياً: '{book_name}' (msg_id={message.message_id}, chat={chat.id})")
     except sqlite3.IntegrityError:
-        pass
+        print(f"ℹ️ الكتاب '{book_name}' مؤرشف مسبقاً بنفس رقم الرسالة، تم التجاهل.")
+    except Exception as e:
+        print(f"❌ فشلت أرشفة '{book_name}' تلقائياً: {e}")
     finally:
         conn.close()
 
@@ -796,19 +837,32 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 # ==================== الإرسال والبحث ====================
 
-async def send_book_results(update, context, valid_books, alternates_map=None):
-    """يرسل الكتب مباشرة (نسخ بدون كابشن، دون إظهار 'محوّلة من القناة').
-    إن فشل إرسال كتاب (مثلاً: الرسالة محذوفة من القناة)، يحاول تلقائياً مع أي
-    نسخة بديلة أخرى بنفس الاسم (alternates_map) قبل الاستسلام والإبلاغ بالفشل.
-    يُرجع (نجح, فشل) حتى لا يختفي أي خطأ بصمت."""
+THANK_YOU_MESSAGES = [
+    "📚 تفضّل، أتمنى لك قراءة ممتعة! سعداء دائماً بخدمتك في مجتمع القراءة 🌿",
+    "✨ تم إرسال طلبك، استمتع بالقراءة! نورت مجتمع القراءة 📖",
+    "🌟 تفضّل كتابك، وبالعافية عليك القراءة! نحن هنا دائماً لأجلك 💚",
+    "📖 وصلك الكتاب، قراءة ممتعة إن شاء الله! أهلاً بك دائماً في مجتمعنا 🌸",
+]
+
+
+async def send_book_results(update, context, valid_books, alternates_map=None, core_alternates_map=None):
+    """يحوّل الكتب من مصدرها (تظهر 'محوّلة من القناة/الكروب' كما طُلب).
+    عند فشل الإرسال، يحاول تلقائياً بنسخ بديلة (بنفس الاسم تماماً أولاً، ثم بنفس
+    العنوان الجوهري كطبقة أخيرة) قبل الاستسلام. يُرسل رسالة ودّية بعد النجاح،
+    ويُبلغ الأدمن فوراً بأي كتاب تعذّر توفيره."""
     alternates_map = alternates_map or {}
+    core_alternates_map = core_alternates_map or {}
     succeeded, failed = [], []
 
     for book_name, msg_id, source_chat_id in valid_books:
         key = normalize_arabic(book_name)
-        # كل النسخ الممكنة لهذا الاسم: المحاولة الأساسية أولاً، ثم أي بدائل أخرى لم تُجرَّب
+        core_key = get_core_title(key)
+
         candidates = [(msg_id, source_chat_id)]
         for alt_msg_id, alt_source in alternates_map.get(key, []):
+            if (alt_msg_id, alt_source) not in candidates:
+                candidates.append((alt_msg_id, alt_source))
+        for alt_msg_id, alt_source in core_alternates_map.get(core_key, []):
             if (alt_msg_id, alt_source) not in candidates:
                 candidates.append((alt_msg_id, alt_source))
 
@@ -816,11 +870,10 @@ async def send_book_results(update, context, valid_books, alternates_map=None):
         sent = False
         for attempt_msg_id, attempt_source in candidates:
             try:
-                await context.bot.copy_message(
+                await context.bot.forward_message(
                     chat_id=update.effective_chat.id,
                     from_chat_id=attempt_source,
-                    message_id=attempt_msg_id,
-                    caption=""
+                    message_id=attempt_msg_id
                 )
                 succeeded.append(book_name)
                 sent = True
@@ -833,27 +886,51 @@ async def send_book_results(update, context, valid_books, alternates_map=None):
         if not sent:
             failed.append((book_name, msg_id, str(last_error)))
 
+    # رسالة ودّية بعد نجاح إرسال كتاب واحد على الأقل
+    if succeeded:
+        try:
+            await update.message.reply_text(random.choice(THANK_YOU_MESSAGES))
+        except Exception:
+            pass
+
     if failed:
         chat_type = update.effective_chat.type
-        user_id = update.effective_user.id
-        if chat_type == 'private' and user_id in ADMIN_IDS:
-            # تفاصيل كاملة للأدمن في الخاص فقط، لتشخيص السبب بدقة
-            # بدون Markdown: أسماء الكتب الحقيقية شبه دائماً تحتوي رموزاً تكسر التنسيق
-            lines = [f"⚠️ تعذّر إرسال {len(failed)} كتاب/كتب من أصل {len(valid_books)} (حتى بعد تجربة كل النسخ البديلة المتاحة):"]
-            for book_name, msg_id, err in failed:
-                lines.append(f"• {book_name} (msg_id: {msg_id})\n   السبب: {err}")
+        requester_user_id = update.effective_user.id
+
+        # إبلاغ فوري لكل الأدمنية بأي كتاب تعذّر توفيره، أياً كان مصدر الطلب
+        requester_name = update.effective_user.full_name or str(requester_user_id)
+        chat_label = "الخاص" if chat_type == 'private' else (update.effective_chat.title or str(update.effective_chat.id))
+        admin_lines = [f"⚠️ تعذّر توفير {len(failed)} كتاب/كتب طُلبت من {chat_label} بواسطة {requester_name}:"]
+        for book_name, msg_id, err in failed:
+            admin_lines.append(f"• {book_name} (msg_id: {msg_id})\n   السبب: {err}")
+        admin_report = "\n".join(admin_lines)
+        for admin_id in ADMIN_IDS:
             try:
-                await update.message.reply_text("\n".join(lines))
+                await context.bot.send_message(admin_id, admin_report)
             except Exception as e:
-                print(f"❌ فشل حتى إرسال تقرير الخطأ نفسه: {e}")
-        elif not succeeded:
+                print(f"❌ تعذّر إبلاغ الأدمن {admin_id}: {e}")
+
+        if not succeeded:
             # لم ينجح أي كتاب إطلاقاً — يجب أن يعرف طالب الكتاب أن هناك خطأ فعلياً
             await update.message.reply_text(
-                "⚠️ تم العثور على الكتاب في الأرشيف لكن تعذّر إرساله فعلياً (قد يكون حُذف من مصدره). "
-                "تم إبلاغ الأدمن."
+                "⚠️ الكتاب موجود في الأرشيف لكن تعذّر توفيره فعلياً حالياً (قد يكون حُذف من مصدره). "
+                "تم إبلاغ الأدمن فوراً وسيُعاد توفيره قريباً بإذن الله."
             )
 
     return succeeded, failed
+
+
+async def notify_admins_not_found(context, update, query_text):
+    """يُبلغ كل الأدمنية فوراً باسم الكتاب الذي لم يُعثر عليه، ومصدر الطلب وطالبه"""
+    chat_type = update.effective_chat.type
+    requester_name = update.effective_user.full_name or str(update.effective_user.id)
+    chat_label = "الخاص" if chat_type == 'private' else (update.effective_chat.title or str(update.effective_chat.id))
+    message = f"🔍 طلب كتاب غير متوفر:\n• الطلب: {query_text}\n• من: {chat_label}\n• بواسطة: {requester_name}"
+    for admin_id in ADMIN_IDS:
+        try:
+            await context.bot.send_message(admin_id, message)
+        except Exception as e:
+            print(f"❌ تعذّر إبلاغ الأدمن {admin_id} بكتاب غير موجود: {e}")
 
 
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -985,9 +1062,11 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             results = [records[i] for i, nn in enumerate(norm_names) if norm_query in nn]
             if not results:
                 await update.message.reply_text(f"❌ لم يتم العثور على أي كتب باسم الكاتب ('{author_query}').")
+                await notify_admins_not_found(context, update, f"كل كتب: {author_query}")
                 return
             alternates_map = build_alternates_map(results)
-            await send_book_results(update, context, dedupe_exact(results), alternates_map)
+            core_alternates_map = build_core_alternates_map(results)
+            await send_book_results(update, context, dedupe_exact(results), alternates_map, core_alternates_map)
             return
 
         results = await asyncio.to_thread(
@@ -997,13 +1076,18 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         if not results:
             await update.message.reply_text(
                 f"❌ عذراً، الاسم ('{clean_query}') غير موجود في أرشيف القناة.\n"
-                f"تأكد من كتابة اسم الكتاب بشكل أقرب للعنوان الأصلي."
+                f"تأكد من كتابة اسم الكتاب بشكل أقرب للعنوان الأصلي.\n"
+                f"تم إبلاغ الأدمن بطلبك ليتم توفيره قريباً بإذن الله."
             )
+            await notify_admins_not_found(context, update, clean_query)
             return
 
-        # خريطة النسخ البديلة (قبل حذف التكرار) — تُستخدم لإعادة المحاولة تلقائياً
-        # إن فشل إرسال نسخة معيّنة (مثلاً: رسالتها محذوفة من القناة)
+        # خريطتا النسخ البديلة (قبل حذف التكرار) — تُستخدمان لإعادة المحاولة تلقائياً
+        # إن فشل إرسال نسخة معيّنة (مثلاً: رسالتها محذوفة من القناة):
+        # 1) بدائل بنفس الاسم تماماً أولاً
+        # 2) ثم كطبقة أخيرة: بدائل بنفس 'العنوان الجوهري' حتى لو اختلف اسم المؤلف/الوصف المرفق
         alternates_map = build_alternates_map(results)
+        core_alternates_map = build_core_alternates_map(results)
 
         deduped = dedupe_exact(results)
         groups = group_into_series(deduped)
@@ -1027,7 +1111,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             else:
                 final_books.append(items[0])
 
-        await send_book_results(update, context, final_books, alternates_map)
+        await send_book_results(update, context, final_books, alternates_map, core_alternates_map)
 
     except Exception as e:
         print(f"❌ خطأ في search_and_forward: {e}")
@@ -1041,7 +1125,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: 2026-08-15-v5-rebuilt-no-userbot")
+    print("🔖 BOT_CODE_VERSION: 2026-08-17-v6-flexible-search-admin-alerts")
     print("=" * 60)
 
     init_db()
