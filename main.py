@@ -291,16 +291,24 @@ def group_into_series(records):
 
 # ==================== فهرس البحث المُخزَّن مؤقتاً ====================
 
-_search_index_cache = {"fingerprint": None, "records": [], "norm_names": [], "norm_names_no_ext": [], "index": {}}
+_search_index_cache = {
+    "fingerprint": None, "records": [], "norm_names": [], "norm_names_no_ext": [],
+    "norm_core_titles": [], "index": {}, "core_index": {}
+}
 
 
 def get_search_index():
-    """يُرجع (records, norm_names, norm_names_no_ext, index)، ويعيد البناء تلقائياً فقط عند تغيّر الأرشيف.
-    - norm_names: الاسم الكامل بعد التطبيع (بما فيه الامتداد كـ'pdf')، يُستخدم في مراحل
-      'يبدأ بـ' و'كل الكلمات' و'التقريبي' — ثبت أنها آمنة وموثوقة (كالكود الأصلي المضمون).
-    - norm_names_no_ext: نفس الاسم لكن بعد حذف الامتداد فقط (.pdf) دون لمس أي رقم،
-      يُستخدم حصراً في مرحلة 'التطابق التام' — لأن ترك الامتداد كان يمنع أي تطابق تام
-      من الأصل ويدفع كل طلب لمرحلة أوسع تُرسل كل الإصدارات المشابهة معاً بدل الدقيق منها."""
+    """يُرجع (records, norm_names, norm_names_no_ext, norm_core_titles, index, core_index).
+    - norm_names: الاسم الكامل بعد التطبيع (بما فيه الامتداد)، لمرحلة 'يبدأ بـ' (تشمل اسم المؤلف
+      إن وُجد، فيعمل طلب 'العنوان + اسم المؤلف معاً' بشكل صحيح).
+    - norm_names_no_ext: الاسم بعد حذف الامتداد فقط، لمرحلة التطابق التام الأساسية.
+    - norm_core_titles: العنوان الجوهري فقط (بعد حذف '- اسم المؤلف' والامتداد)، يُستخدم في
+      مرحلة تطابق تام إضافية تسمح بطلب العنوان وحده حتى لو كان مخزَّناً مع اسم المؤلف
+      (يعمل حتى مع كلمة واحدة، بأمان، لأنه تطابق تام حصراً وليس احتواءً).
+    - index: فهرس الكلمات من الاسم الكامل (يشمل اسم المؤلف)، لمرحلة 'يبدأ بـ' فقط عبر norm_names
+      (غير مُستخدم مباشرة، محفوظ للتوافق).
+    - core_index: فهرس الكلمات من العنوان الجوهري فقط (بدون اسم المؤلف) — يمنع طلب اسم المؤلف
+      وحده (بدون عنوان) من مطابقة كل كتبه عبر مرحلتي 'كل الكلمات' و'التقريبي'."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM archive")
@@ -308,10 +316,8 @@ def get_search_index():
 
     if _search_index_cache["fingerprint"] == fingerprint:
         conn.close()
-        return (
-            _search_index_cache["records"], _search_index_cache["norm_names"],
-            _search_index_cache["norm_names_no_ext"], _search_index_cache["index"]
-        )
+        c = _search_index_cache
+        return (c["records"], c["norm_names"], c["norm_names_no_ext"], c["norm_core_titles"], c["index"], c["core_index"])
 
     cursor.execute("SELECT book_name, msg_id, source_chat_id FROM archive GROUP BY msg_id, source_chat_id")
     raw_records = cursor.fetchall()
@@ -319,8 +325,9 @@ def get_search_index():
 
     norm_forbidden = [normalize_arabic(p) for p in FORBIDDEN_PREFIXES]
 
-    records, norm_names, norm_names_no_ext = [], [], []
+    records, norm_names, norm_names_no_ext, norm_core_titles = [], [], [], []
     index = defaultdict(set)
+    core_index = defaultdict(set)
 
     for book_name, msg_id, source_chat_id in raw_records:
         norm_name = normalize_arabic(book_name)
@@ -331,29 +338,43 @@ def get_search_index():
         records.append((book_name, msg_id, source_chat_id))
         norm_names.append(norm_name)
         norm_names_no_ext.append(normalize_arabic(strip_extension_only(book_name)))
+        core_title = get_core_title(book_name)
+        norm_core_titles.append(core_title)
+
         for w in get_words(norm_name):
             index[w].add(i)
+        for w in get_words(core_title):
+            core_index[w].add(i)
 
     _search_index_cache.update(
         fingerprint=fingerprint, records=records, norm_names=norm_names,
-        norm_names_no_ext=norm_names_no_ext, index=index
+        norm_names_no_ext=norm_names_no_ext, norm_core_titles=norm_core_titles,
+        index=index, core_index=core_index
     )
-    return records, norm_names, norm_names_no_ext, index
+    return records, norm_names, norm_names_no_ext, norm_core_titles, index, core_index
 
 
-def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext, index):
+def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext, norm_core_titles, core_index):
     """
     بحث دقيق بأولويات صارمة:
-    1) تطابق تام كامل للاسم (بعد حذف الامتداد فقط .pdf — وليس رقم الجزء)
-    2) (كلمتان فأكثر) الاسم الكامل (بامتداده) يبدأ بنص الطلب بالكامل
-    3) (كلمتان فأكثر) كل كلمات الطلب موجودة كاملة (عبر الفهرس)
-    4) (كلمتان فأكثر، وكل كلمة 3 أحرف فأكثر) تطابق تقريبي صارم (85%+)
+    1) تطابق تام للاسم الكامل (بعد حذف الامتداد فقط)
+       أو تطابق تام للعنوان الجوهري (بعد حذف '- اسم المؤلف' أيضاً) — يعمل حتى بكلمة واحدة،
+       لأنه تطابق تام حصراً، فيسمح بطلب العنوان وحده حتى لو خُزِّن مع اسم المؤلف
+       (مثال: 'الصداقة' تُطابق 'الصداقة - فلان.pdf').
+    2) (كلمتان فأكثر) الاسم الكامل (بامتداده، ويشمل اسم المؤلف إن وُجد) يبدأ بنص الطلب بالكامل
+       — يسمح بطلب 'العنوان + اسم المؤلف معاً'.
+    3) (كلمتان فأكثر) كل كلمات الطلب موجودة في العنوان الجوهري فقط (بدون اسم المؤلف) —
+       يمنع طلب اسم المؤلف وحده (بدون عنوان) من مطابقة كل كتبه بالخطأ.
+    4) (كلمتان فأكثر، وكل كلمة 3 أحرف فأكثر) تطابق تقريبي صارم على العنوان الجوهري فقط.
     """
     query_words = get_words(norm_query)
 
-    exact = [records[i] for i, nn in enumerate(norm_names_no_ext) if nn == norm_query]
+    exact = [
+        records[i] for i, nn in enumerate(norm_names_no_ext)
+        if nn == norm_query or norm_core_titles[i] == norm_query
+    ]
     if exact:
-        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE1(exact) -> {[r[0] for r in exact]}")
+        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE1(exact/core) -> {[r[0] for r in exact]}")
         return exact
 
     if len(query_words) < 2:
@@ -365,12 +386,12 @@ def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext
         print(f"🔎 SEARCH[{norm_query!r}] -> STAGE2(startswith) -> {[r[0] for r in startswith_matches]}")
         return startswith_matches
 
-    word_sets = [index.get(qw) for qw in query_words]
+    word_sets = [core_index.get(qw) for qw in query_words]
     if all(word_sets):
         common = set.intersection(*word_sets)
         if common:
             result = [records[i] for i in common]
-            print(f"🔎 SEARCH[{norm_query!r}] -> STAGE3(all words) -> {[r[0] for r in result]}")
+            print(f"🔎 SEARCH[{norm_query!r}] -> STAGE3(all words in core title) -> {[r[0] for r in result]}")
             return result
 
     if any(len(qw) < 3 for qw in query_words):
@@ -379,16 +400,16 @@ def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext
     else:
         cutoff = 0.85
 
-    vocabulary = list(index.keys())
+    vocabulary = list(core_index.keys())
     per_word_candidates = []
     for qw in query_words:
         # الكلمات القصيرة جداً (أقل من 3 أحرف) لا تخضع للتقريب إطلاقاً — يجب أن تُطابق بحروفها بالضبط
         # (منع مشاكل مثل مطابقة "فن" مع كلمات أخرى قصيرة غير مرتبطة إطلاقاً)
         if len(qw) < 3:
-            if qw not in index:
+            if qw not in core_index:
                 print(f"🔎 SEARCH[{norm_query!r}] -> كلمة قصيرة '{qw}' غير موجودة حرفياً -> فارغ")
                 return []
-            word_candidates = set(index[qw])
+            word_candidates = set(core_index[qw])
         else:
             close_words = difflib.get_close_matches(qw, vocabulary, n=5, cutoff=cutoff)
             if not close_words:
@@ -396,12 +417,12 @@ def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext
                 return []
             word_candidates = set()
             for w in close_words:
-                word_candidates |= index.get(w, set())
+                word_candidates |= core_index.get(w, set())
         per_word_candidates.append(word_candidates)
 
     common = set.intersection(*per_word_candidates) if per_word_candidates else set()
     result = [records[i] for i in common]
-    print(f"🔎 SEARCH[{norm_query!r}] -> STAGE4(تقريبي) -> {[r[0] for r in result]}")
+    print(f"🔎 SEARCH[{norm_query!r}] -> STAGE4(تقريبي على العنوان الجوهري) -> {[r[0] for r in result]}")
     return result
 
 
@@ -1038,10 +1059,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         norm_query = normalize_arabic(author_query)
     else:
         phrases_to_remove = sorted([
-            "اريد كتاب", "أريد كتاب","ابغى","ابغى كتاب","ابغى رواية"
-            , "ممكن","ممكن كتاب","ممكن رواية","احتاج","احتاج كتاب","احتاج رواية","الاقي","الاقي كتاب","الاقي رواية","عايزة"
-            ,"عايزة كتاب","عايزة رواية","عايز","عايز كتاب","عايز رواية","عاوزة","عاوزة كتاب"
-            ,"عاوزة رواية","عاوز","عاوز كتاب","عاوز رواية", "اريد كتاب ال", "أريد كتاب ال",
+            "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
             "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب",
             "اريد", "أريد", "كتاب", "رواية"
         ], key=len, reverse=True)
@@ -1059,9 +1077,10 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        records, norm_names, norm_names_no_ext, index = await asyncio.to_thread(get_search_index)
+        records, norm_names, norm_names_no_ext, norm_core_titles, index, core_index = await asyncio.to_thread(get_search_index)
 
         if is_author_request:
+            # وضع "كل كتب الكاتب": بحث احتوائي مقصود وواسع على الاسم الكامل (يشمل اسم المؤلف)
             results = [records[i] for i, nn in enumerate(norm_names) if norm_query in nn]
             if not results:
                 await update.message.reply_text(f"❌ لم يتم العثور على أي كتب باسم الكاتب ('{author_query}').")
@@ -1073,7 +1092,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         results = await asyncio.to_thread(
-            find_book_matches_indexed, norm_query, records, norm_names, norm_names_no_ext, index
+            find_book_matches_indexed, norm_query, records, norm_names, norm_names_no_ext, norm_core_titles, core_index
         )
 
         if not results:
@@ -1084,6 +1103,23 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             )
             await notify_admins_not_found(context, update, clean_query)
             return
+
+        # استكمال بقية أجزاء السلسلة تلقائياً: حتى لو طابق البحث الأساسي جزءاً واحداً فقط
+        # (بسبب اختلاف بسيط في صيغة تسمية باقي الأجزاء)، نجلب أي كتاب آخر يشارك نفس
+        # 'الاسم الأساسي' بعد حذف رقم/اسم الجزء. نتجاهل المسافات في هذه المقارنة تحديداً
+        # (لا في المطابقة العادية) لأن فروقاً بسيطة مثل 'وحرز' مقابل 'و حرز' شائعة جداً
+        # بين رفعات مختلفة لنفس الكتاب ولا يجب أن تمنع ربط أجزائه ببعضها.
+        def loose_series_key(name):
+            return normalize_arabic(strip_part_pattern(name)).replace(' ', '')
+
+        found_base_keys = {loose_series_key(r[0]) for r in results}
+        if found_base_keys:
+            existing_ids = {(r[1], r[2]) for r in results}
+            for idx, (rec_name, rec_msg, rec_source) in enumerate(records):
+                if (rec_msg, rec_source) in existing_ids:
+                    continue
+                if loose_series_key(rec_name) in found_base_keys:
+                    results.append((rec_name, rec_msg, rec_source))
 
         # خريطتا النسخ البديلة (قبل حذف التكرار) — تُستخدمان لإعادة المحاولة تلقائياً
         # إن فشل إرسال نسخة معيّنة (مثلاً: رسالتها محذوفة من القناة):
@@ -1097,18 +1133,25 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         final_books = []
         for base_key, items in groups.items():
-            distinct_parts = {extract_part_number(b) for b, _, _ in items if extract_part_number(b) is not None}
-            if len(distinct_parts) >= 2:
-                sorted_items = sorted(items, key=lambda x: (extract_part_number(x[0]) is None, extract_part_number(x[0]) or 0))
-                # إزالة تكرار رقم الجزء نفسه (مثال: جزء 1 مرفوع مرتين بصيغتين مختلفتين قليلاً)
-                # نُبقي أول نسخة فقط لكل رقم جزء فريد
+            if len(items) >= 2:
+                # أكثر من نسخة مختلفة (بعد حذف التكرار الحرفي) تشترك بنفس الاسم الأساسي
+                # بعد حذف رقم الجزء — على الأغلب هي أجزاء/مجلدات لنفس الكتاب، حتى لو لم
+                # يحمل كل عنصر رقم جزء صريحاً في اسمه (مثال: الجزء الثاني مخزَّن بدون
+                # كلمة 'جزء' في اسمه). نُرسلها جميعاً، ونُرتّبها برقم الجزء عند توفره.
+                sorted_items = sorted(
+                    items, key=lambda x: (extract_part_number(x[0]) is None, extract_part_number(x[0]) or 0)
+                )
+                # نحذف التكرار فقط بين عناصر تحمل نفس رقم الجزء الصريح (مثال: جزء 1 مرفوع
+                # مرتين بصيغتين مختلفتين قليلاً) — أما العناصر بلا رقم جزء واضح (None)
+                # فتبقى جميعها، لأننا لا نملك دليلاً على أنها مكررة فعلياً.
                 seen_parts = set()
                 unique_parts = []
                 for item in sorted_items:
                     part_num = extract_part_number(item[0])
-                    if part_num in seen_parts:
-                        continue
-                    seen_parts.add(part_num)
+                    if part_num is not None:
+                        if part_num in seen_parts:
+                            continue
+                        seen_parts.add(part_num)
                     unique_parts.append(item)
                 final_books.extend(unique_parts)
             else:
@@ -1128,7 +1171,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: 2026-08-17-v6-flexible-search-admin-alerts")
+    print("🔖 BOT_CODE_VERSION: 2026-08-17-v7-partial-part-groups-fix")
     print("=" * 60)
 
     init_db()
