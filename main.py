@@ -28,6 +28,9 @@ DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 
 CHANNEL_ID = -1004395670008
+
+# الكروب الرئيسي — مصدر ثانٍ ثابت للكتب بجانب القناة، دائماً معتمد بغض النظر عن حالة قاعدة البيانات
+GROUP_ID = -1002066990968
 ADMIN_IDS = [7898871921, 1937491557]
 BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
@@ -254,7 +257,7 @@ def build_alternates_map(records):
     return alternates
 
 
-CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s*[-–]\s+')
+CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s+[-–—]\s*')
 
 
 def get_core_title(raw_book_name):
@@ -431,7 +434,7 @@ def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext
 async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat = update.effective_chat
     if chat and chat.type in ['group', 'supergroup']:
-        if is_group_approved(chat.id):
+        if chat.id == GROUP_ID or is_group_approved(chat.id):
             return True
         try:
             await context.bot.send_message(chat.id, LEAVE_TEXT, parse_mode="Markdown", disable_web_page_preview=True)
@@ -496,7 +499,7 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat is None:
         return
-    if chat.id != CHANNEL_ID and not is_group_approved(chat.id):
+    if chat.id != CHANNEL_ID and chat.id != GROUP_ID and not is_group_approved(chat.id):
         return
 
     document = message.document or message.video or message.audio
@@ -1171,7 +1174,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: 2026-08-17-v7-partial-part-groups-fix")
+    print("🔖 BOT_CODE_VERSION: 2026-08-17-v8-group-source-plus-dash-fix")
     print("=" * 60)
 
     init_db()
