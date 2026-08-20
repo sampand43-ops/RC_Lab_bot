@@ -265,33 +265,29 @@ FORBIDDEN_PREFIXES = ["صور من", "قصص من", "مختصر", "شرح"]
 
 
 def dedupe_exact(records):
-    """يحذف النسخ المتطابقة فعلياً، مع اختيار الاسم الأنظف عند وجود .pdf.1/.2..."""
+    """توحيد النسخ المتطابقة فعلياً، مع تفضيل الاسم الأنظف."""
     best = {}
-    order = []
 
     def quality(book_name):
         title = get_title_line(book_name)
         duplicate_suffix = bool(DUPLICATE_UPLOAD_SUFFIX_PATTERN.search(title))
         parenthetical_copy = bool(TRAILING_PAREN_NUMBER_PATTERN.search(strip_extension_only(title)))
-        # نفضّل النسخة النظيفة على .pdf.1 أو (2)، ثم الاسم الأقصر.
+        # الاسم الأقصر عادةً هو النسخة الأنظف (بدون اسم مؤلف/وصف إضافي).
         return (duplicate_suffix, parenthetical_copy, len(title))
 
-    for book_name, msg_id, source_chat_id in records:
-        title_line = get_title_line(book_name)
-        no_ext = strip_extension_only(title_line)
-        no_dup_number = TRAILING_PAREN_NUMBER_PATTERN.sub('', no_ext).strip()
-        key = normalize_arabic(no_dup_number)
+    for item in records:
+        book_name = item[0]
+        key = normalize_arabic(
+            TRAILING_PAREN_NUMBER_PATTERN.sub('', strip_extension_only(
+                strip_duplicate_upload_suffix(get_title_line(book_name))
+            )).strip()
+        )
         if not key:
             continue
-
-        item = (book_name, msg_id, source_chat_id)
-        if key not in best:
-            best[key] = item
-            order.append(key)
-        elif quality(item[0]) < quality(best[key][0]):
+        if key not in best or quality(book_name) < quality(best[key][0]):
             best[key] = item
 
-    return [best[key] for key in order]
+    return list(best.values())
 
 
 def build_alternates_map(records):
@@ -309,21 +305,23 @@ CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s+[-–—]\s*|\s*[-–—]\s+')
 
 
 def get_core_title(raw_book_name):
-    """يستخرج العنوان الجوهري الذي نستخدمه لمنع التكرار.
-    اسم المؤلف الملحق بعد شرطة لا يغيّر هوية الكتاب، والرقم داخل قوسين
-    في نهاية الاسم لا يُعتبر جزءاً.
+    """يرجع المفتاح الموحد للكتاب/السلسلة لمنع التكرار.
+    يتجاهل: التشكيل والرموز والفواصل، اسم المؤلف الملحق بعد شرطة،
+    لاحقات الرفع مثل .pdf.1، والرقم بين قوسين في نهاية الاسم، ووسم الجزء.
     """
     if not raw_book_name:
         return ""
-    raw_book_name = get_title_line(raw_book_name)
-    raw_book_name = strip_duplicate_upload_suffix(raw_book_name)
-    # افصل اسم المؤلف أولاً، ثم أزل وسم الجزء حتى تتجمع كل الأجزاء تحت عنوان واحد.
-    core_raw = CORE_TITLE_SPLIT_PATTERN.split(raw_book_name, maxsplit=1)[0].strip()
-    core_raw = PART_PATTERN.sub('', core_raw)
-    core_raw = TRAILING_NUM_PATTERN.sub('', core_raw)
-    core_raw = strip_extension_only(core_raw)
-    core_raw = TRAILING_PAREN_NUMBER_PATTERN.sub('', core_raw).strip()
-    return normalize_arabic(core_raw)
+    name = get_title_line(raw_book_name).strip()
+    name = strip_duplicate_upload_suffix(name)
+    name = strip_extension_only(name)
+    name = TRAILING_PAREN_NUMBER_PATTERN.sub('', name).strip()
+    # اسم المؤلف بعد شرطة لا يغيّر هوية الكتاب.
+    name = CORE_TITLE_SPLIT_PATTERN.split(name, maxsplit=1)[0].strip()
+    # إزالة وسم الجزء بعد فصل اسم المؤلف.
+    name = PART_PATTERN.sub(' ', name)
+    name = TRAILING_NUM_PATTERN.sub('', name).strip()
+    name = TRAILING_PAREN_NUMBER_PATTERN.sub('', name).strip()
+    return normalize_arabic(name)
 
 
 def build_core_alternates_map(records):
@@ -338,42 +336,43 @@ def build_core_alternates_map(records):
 
 def group_into_series(records):
     groups = defaultdict(list)
-    for book_name, msg_id, source_chat_id in records:
-        # العنوان الجوهري يوحّد نفس الكتاب مع/بدون اسم المؤلف،
-        # ومع اختلاف التشكيل والفواصل والرموز، وكذلك (1)/(2) كنسخ مكررة.
-        base_key = get_core_title(book_name)
-        groups[base_key].append((book_name, msg_id, source_chat_id))
+    for item in records:
+        base_key = get_core_title(item[0])
+        if base_key:
+            groups[base_key].append(item)
     return groups
 
 
 def reduce_to_unique_parts(records):
-    """يمنع إرسال النسخ المكررة مع إبقاء الأجزاء الحقيقية فقط.
-    نفس العنوان مع/بدون اسم المؤلف = نسخة واحدة.
-    اختلاف التشكيل والفواصل والرموز = نسخة واحدة.
-    الرقم داخل قوسين في النهاية = نسخة مكررة وليس جزءاً.
-    أما الأجزاء المعلّمة صراحةً (الجزء 1، Part 2، أو رقم جزء نهائي غير محاط
-    بأقواس) فتبقى كأجزاء منفصلة.
+    """قاعدة الإرسال النهائية:
+    - نسخة واحدة فقط للكتاب نفسه.
+    - .pdf.1/.pdf.2 و(1)/(2) ليست أجزاء.
+    - اسم المؤلف المضاف لا يصنع نسخة جديدة.
+    - الأجزاء الحقيقية تُرتب 1 ثم 2 ثم 3...
     """
-    deduped = dedupe_exact(records)
-    groups = group_into_series(deduped)
-
+    groups = group_into_series(records)
     final_books = []
-    for base_key, items in groups.items():
-        sorted_items = sorted(items, key=lambda x: extract_part_number(x[0]) or 0)
-        seen_parts = set()
-        seen_unlabeled = False
 
-        for item in sorted_items:
+    def quality(book_name):
+        title = get_title_line(book_name)
+        duplicate_suffix = bool(DUPLICATE_UPLOAD_SUFFIX_PATTERN.search(title))
+        parenthetical_copy = bool(TRAILING_PAREN_NUMBER_PATTERN.search(strip_extension_only(title)))
+        has_author_suffix = bool(CORE_TITLE_SPLIT_PATTERN.search(strip_extension_only(
+            strip_duplicate_upload_suffix(title)
+        )))
+        return (duplicate_suffix, parenthetical_copy, has_author_suffix, len(title))
+
+    for base_key, items in groups.items():
+        # نختار نسخة واحدة فقط لكل رقم جزء.
+        chosen = {}
+        for item in items:
             part_num = extract_part_number(item[0])
-            if part_num is not None:
-                if part_num in seen_parts:
-                    continue
-                seen_parts.add(part_num)
-            else:
-                if seen_unlabeled:
-                    continue
-                seen_unlabeled = True
-            final_books.append(item)
+            bucket = 0 if part_num is None else part_num
+            if bucket not in chosen or quality(item[0]) < quality(chosen[bucket][0]):
+                chosen[bucket] = item
+
+        for bucket in sorted(chosen):
+            final_books.append(chosen[bucket])
 
     return final_books
 
@@ -1094,6 +1093,9 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
                 )
                 succeeded.append(book_name)
                 sent = True
+                # فاصل ثابت بين الملفات فقط، وليس بعد آخر ملف.
+                if i < len(valid_books) - 1:
+                    await asyncio.sleep(0.5)
                 break
             except Exception as e:
                 last_error = e
@@ -1455,7 +1457,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: 2026-08-20-v13-strict-dedupe-series-order")
+    print("🔖 BOT_CODE_VERSION: 2026-08-20-v14-strict-dedupe-series-order-delay")
     print("=" * 60)
 
     init_db()
