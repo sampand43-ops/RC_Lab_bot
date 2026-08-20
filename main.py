@@ -155,10 +155,14 @@ PART_PATTERN = re.compile(
     r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)',
     re.IGNORECASE
 )
-# مهم جداً: رقم واحد فقط (1-9) في نهاية الاسم يُعتبر "رقم جزء محتمل".
-# لا نسمح بأرقام أطول لأنها غالباً معرّفات عشوائية (IDs) لا علاقة لها بترقيم الأجزاء،
-# وقبولها كان يسبب تطابق كتب مختلفة تماماً بالخطأ بعد حذف "الرقم" من نهاية أسمائها.
+# رقم واحد فقط (1-9) في نهاية الاسم يُعتبر "رقم جزء محتمل".
+# الرقم داخل قوسين في نهاية الاسم مثل "اسم الكتاب (2)" ليس جزءاً،
+# بل يُعامل كنسخة مكررة من الكتاب نفسه.
 TRAILING_NUM_PATTERN = re.compile(r'[\s\-_]([0-9٠-٩])\s*(?:\.pdf|\.epub|\.zip)?$')
+TRAILING_PAREN_NUMBER_PATTERN = re.compile(
+    r'\s*\(\s*[0-9٠-٩]+\s*\)\s*(?=(?:\.pdf|\.epub|\.zip|\.mobi|\.docx?|\.rar|\.txt)?$)',
+    re.IGNORECASE
+)
 
 
 def get_title_line(raw_book_name):
@@ -252,10 +256,16 @@ FORBIDDEN_PREFIXES = ["صور من", "قصص من", "مختصر", "شرح"]
 
 
 def dedupe_exact(records):
+    # التطبيع يزيل التشكيل وعلامات الترقيم والفواصل والرموز الزائدة،
+    # لذلك اختلافها في اسم الملف لا يجعل الكتاب نسخة جديدة.
     seen = set()
     deduped = []
     for book_name, msg_id, source_chat_id in records:
-        key = normalize_arabic(book_name)
+        title_line = get_title_line(book_name)
+        no_ext = strip_extension_only(title_line)
+        # (1)، (2)، ... في نهاية الاسم أرقام نسخ وليست أجزاء.
+        no_dup_number = TRAILING_PAREN_NUMBER_PATTERN.sub('', no_ext).strip()
+        key = normalize_arabic(no_dup_number)
         if key in seen:
             continue
         seen.add(key)
@@ -278,19 +288,16 @@ CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s+[-–—]\s*|\s*[-–—]\s+')
 
 
 def get_core_title(raw_book_name):
-    """يستخرج 'العنوان الجوهري' بأخذ السطر الأول فقط، ثم حذف كل ما بعد أول شرطة
-    (يليها مسافة)، ثم حذف الامتداد، ثم تطبيع الناتج. يجب استدعاؤها على الاسم الخام
-    (قبل normalize_arabic)، لأن التطبيع يحذف الشرطة نفسها فتفقد إمكانية العثور عليها.
-    مثال: 'احببت وغدا - عماد رشاد.pdf' -> 'احببت وغدا'.
-    يُستخدم فقط كطبقة احتياطية أخيرة لإعادة المحاولة عند الفشل — وليس للمطابقة
-    الأساسية — حتى لا يختلط كتابان مختلفان فعلياً بنفس العنوان الأساسي (مثل
-    'فن الحرب' و'فن الحرب - نيكولاس ميكيافيلي' اللذين يُعاملان كنسختين مختلفتين
-    عمداً عند الاختيار الأول، لكن كبدائل إعادة محاولة أخيرة هذا مقبول)."""
+    """يستخرج العنوان الجوهري الذي نستخدمه لمنع التكرار.
+    اسم المؤلف الملحق بعد شرطة لا يغيّر هوية الكتاب، والرقم داخل قوسين
+    في نهاية الاسم لا يُعتبر جزءاً.
+    """
     if not raw_book_name:
         return ""
     raw_book_name = get_title_line(raw_book_name)
     core_raw = CORE_TITLE_SPLIT_PATTERN.split(raw_book_name, maxsplit=1)[0].strip()
     core_raw = strip_extension_only(core_raw)
+    core_raw = TRAILING_PAREN_NUMBER_PATTERN.sub('', core_raw).strip()
     return normalize_arabic(core_raw)
 
 
@@ -307,39 +314,42 @@ def build_core_alternates_map(records):
 def group_into_series(records):
     groups = defaultdict(list)
     for book_name, msg_id, source_chat_id in records:
-        base_key = normalize_arabic(strip_part_pattern(book_name))
+        # العنوان الجوهري يوحّد نفس الكتاب مع/بدون اسم المؤلف،
+        # ومع اختلاف التشكيل والفواصل والرموز، وكذلك (1)/(2) كنسخ مكررة.
+        base_key = get_core_title(book_name)
         groups[base_key].append((book_name, msg_id, source_chat_id))
     return groups
 
 
 def reduce_to_unique_parts(records):
-    """يحذف النسخ المكررة، ويُبقي نسخة واحدة فقط لكل كتاب لا يحتوي أجزاءً، بينما
-    يُبقي كل الأجزاء المميزة (مرتبة تصاعدياً) للكتب متعددة الأجزاء الفعلية.
-    يُستخدم في كل مسارات الإرسال (بحث عادي + طلب كل كتب مؤلف) لتوحيد السلوك."""
+    """يمنع إرسال النسخ المكررة مع إبقاء الأجزاء الحقيقية فقط.
+    نفس العنوان مع/بدون اسم المؤلف = نسخة واحدة.
+    اختلاف التشكيل والفواصل والرموز = نسخة واحدة.
+    الرقم داخل قوسين في النهاية = نسخة مكررة وليس جزءاً.
+    أما الأجزاء المعلّمة صراحةً (الجزء 1، Part 2، أو رقم جزء نهائي غير محاط
+    بأقواس) فتبقى كأجزاء منفصلة.
+    """
     deduped = dedupe_exact(records)
     groups = group_into_series(deduped)
 
     final_books = []
     for base_key, items in groups.items():
-        if len(items) >= 2:
-            sorted_items = sorted(items, key=lambda x: extract_part_number(x[0]) or 0)
-            seen_parts = set()
-            seen_unlabeled = False
-            unique_parts = []
-            for item in sorted_items:
-                part_num = extract_part_number(item[0])
-                if part_num is not None:
-                    if part_num in seen_parts:
-                        continue
-                    seen_parts.add(part_num)
-                else:
-                    if seen_unlabeled:
-                        continue
-                    seen_unlabeled = True
-                unique_parts.append(item)
-            final_books.extend(unique_parts)
-        else:
-            final_books.append(items[0])
+        sorted_items = sorted(items, key=lambda x: extract_part_number(x[0]) or 0)
+        seen_parts = set()
+        seen_unlabeled = False
+
+        for item in sorted_items:
+            part_num = extract_part_number(item[0])
+            if part_num is not None:
+                if part_num in seen_parts:
+                    continue
+                seen_parts.add(part_num)
+            else:
+                if seen_unlabeled:
+                    continue
+                seen_unlabeled = True
+            final_books.append(item)
+
     return final_books
 
 
@@ -1192,6 +1202,27 @@ def strip_filler_phrases(query_text):
     return cleaned
 
 
+def is_author_only_query(norm_query, records):
+    """يرفض الطلب عندما يساوي اسم المؤلف الملحق بعنوان الكتاب فقط.
+    نعتمد على الأسماء المخزنة فعلياً بدلاً من التخمين من اسم شخص عام.
+    """
+    if not norm_query:
+        return False
+
+    for book_name, _, _ in records:
+        title_line = get_title_line(book_name)
+        parts = CORE_TITLE_SPLIT_PATTERN.split(title_line, maxsplit=1)
+        if len(parts) != 2:
+            continue
+
+        author_raw = strip_extension_only(parts[1].strip())
+        author_raw = TRAILING_PAREN_NUMBER_PATTERN.sub('', author_raw).strip()
+        if normalize_arabic(author_raw) == norm_query:
+            return True
+
+    return False
+
+
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.message.text:
         return
@@ -1308,6 +1339,12 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     try:
         records, norm_names, norm_names_no_ext, norm_core_titles, index, core_index = await asyncio.to_thread(get_search_index)
+
+        # إذا كتب العضو اسم الكاتب وحده (بدون اسم كتاب)، لا نرسل أي ملف.
+        # طلب "كل كتب <الكاتب>" الصريح يبقى مساره الخاص كما هو.
+        if not is_author_request and is_author_only_query(norm_query, records):
+            await update.message.reply_text("⚠️ يرجى كتابة اسم الكتاب أيضاً، لا يكفي اسم المؤلف وحده.")
+            return
 
         if is_author_request:
             # وضع "كل كتب الكاتب": بحث احتوائي مقصود وواسع على الاسم الكامل (يشمل اسم المؤلف)
