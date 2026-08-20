@@ -273,7 +273,7 @@ def build_alternates_map(records):
     return alternates
 
 
-CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s+[-–—]\s*')
+CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s+[-–—]\s*|\s*[-–—]\s+')
 
 
 def get_core_title(raw_book_name):
@@ -525,7 +525,10 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat is None:
         return
-    if chat.id != CHANNEL_ID and chat.id != GROUP_ID and not is_group_approved(chat.id):
+    # المصدر الوحيد المعتمد للأرشفة التلقائية الآن هو الكروب الرئيسي (وأي كروب آخر
+    # يُضاف ويُعتمد يدوياً عبر allowed_groups). القناة لم تعد مصدراً — أي ملف يُرفع
+    # إليها لا يُؤرشف تلقائياً بعد الآن.
+    if chat.id != GROUP_ID and not is_group_approved(chat.id):
         return
 
     document = message.document or message.video or message.audio
@@ -582,15 +585,20 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
+    # الكابشن (إن وُجد) يبقى تجاوزاً يدوياً اختيارياً لمن يريد فرض مصدر معيّن،
+    # لكنه لم يعد الاعتماد الأساسي — لأن نسيان كتابته كان يتسبب بأرشفة كل كتب
+    # الكروب (رسائل بأرقام ضخمة تصل لمئات الآلاف) على أنها من القناة افتراضياً،
+    # فيفشل تحويلها لاحقاً بخطأ "Message to forward not found" لأن رقم الرسالة
+    # غير موجود أصلاً في القناة.
     caption = update.message.caption
-    try:
-        source_chat_id = int(caption.strip()) if caption else CHANNEL_ID
-    except ValueError:
-        source_chat_id = CHANNEL_ID
+    forced_source_chat_id = None
+    if caption:
+        try:
+            forced_source_chat_id = int(caption.strip())
+        except ValueError:
+            forced_source_chat_id = None
 
-    status_msg = await update.message.reply_text(
-        f"🚀 جاري تحليل ملف التصدير (المصدر: `{source_chat_id}`)...", parse_mode="Markdown"
-    )
+    status_msg = await update.message.reply_text("🚀 جاري تحليل ملف التصدير...")
 
     try:
         try:
@@ -610,6 +618,31 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
+
+        # اكتشاف المصدر الحقيقي تلقائياً من الملف نفسه: تصدير Telegram Desktop يضع
+        # في جذر الـ JSON حقل "id" وهو معرّف الشات الداخلي (بدون البادئة -100)،
+        # ونفس الصيغة التي يستخدمها Bot API لأي قناة أو سوبر-كروب هي:
+        # chat_id = -100<id>. هذا يطابق تماماً GROUP_ID و CHANNEL_ID الحاليين،
+        # فنحسب المصدر مباشرة من الملف بدل تخمينه أو الاعتماد على تذكّر الأدمن.
+        auto_detected_source_id = None
+        raw_json_id = data.get("id")
+        if isinstance(raw_json_id, int):
+            auto_detected_source_id = int(f"-100{raw_json_id}")
+
+        if forced_source_chat_id is not None:
+            source_chat_id = forced_source_chat_id
+            source_note = f"مصدر مفروض يدوياً عبر الكابشن: `{source_chat_id}`"
+        elif auto_detected_source_id is not None:
+            source_chat_id = auto_detected_source_id
+            source_note = f"تم اكتشاف المصدر تلقائياً من الملف: `{source_chat_id}`"
+        else:
+            source_chat_id = GROUP_ID
+            source_note = f"تعذّر اكتشاف المصدر من الملف، تم استخدام الكروب (المصدر الوحيد المعتمد) افتراضياً: `{source_chat_id}`"
+
+        try:
+            await status_msg.edit_text(f"🚀 {source_note}\nجاري الأرشفة...", parse_mode="Markdown")
+        except Exception:
+            pass
 
         messages = data.get("messages", [])
         total_msgs = len(messages)
@@ -950,6 +983,13 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
             if (alt_msg_id, alt_source) not in candidates:
                 candidates.append((alt_msg_id, alt_source))
 
+        # طبقة أمان أخيرة: بعض الكتب (من استيراد JSON قديم قبل اعتماد الكروب كمصدر
+        # وحيد) قد تكون مخزَّنة برقم رسالة صحيح لكن مصدرها القديم (القناة) لم يعد
+        # مصدراً معتمداً. قبل الاستسلام، جرّب نفس رقم الرسالة من الكروب تحديداً (المصدر
+        # الوحيد المعتمد الآن) إن لم تتم تجربته بعد.
+        if (msg_id, GROUP_ID) not in candidates:
+            candidates.append((msg_id, GROUP_ID))
+
         last_error = None
         sent = False
         for attempt_msg_id, attempt_source in candidates:
@@ -1213,12 +1253,29 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         # تسميتها عن اسم الجزء الأول بشكل أكبر (مثلاً وصف/مؤلف مختلف مرفق مع كل جزء)
         found_core_keys = {get_core_title(r[0]).replace(' ', '') for r in results}
 
+        def _keys_similar(a, b, threshold=0.9):
+            if not a or not b:
+                return False
+            return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
+
         if found_base_keys or found_core_keys:
             existing_ids = {(r[1], r[2]) for r in results}
             for idx, (rec_name, rec_msg, rec_source) in enumerate(records):
                 if (rec_msg, rec_source) in existing_ids:
                     continue
-                if loose_series_key(rec_name) in found_base_keys or get_core_title(rec_name).replace(' ', '') in found_core_keys:
+                rec_loose = loose_series_key(rec_name)
+                rec_core = get_core_title(rec_name).replace(' ', '')
+                is_match = rec_loose in found_base_keys or rec_core in found_core_keys
+                if not is_match and extract_part_number(rec_name) is not None:
+                    # طبقة أخيرة أكثر تساهلاً: تُستخدم فقط للسجلات التي تحمل رقم جزء
+                    # صريح في اسمها (لذلك شبه مؤكد أنها جزء من كتاب متسلسل)، وتسمح
+                    # بتشابه قوي (90%+) بدل تطابق تام — يلتقط فروقاً بسيطة في كتابة
+                    # اسم الجزء التالي لم تُغطِّها المقارنة الدقيقة أعلاه.
+                    is_match = (
+                        any(_keys_similar(rec_loose, k) for k in found_base_keys)
+                        or any(_keys_similar(rec_core, k) for k in found_core_keys)
+                    )
+                if is_match:
                     results.append((rec_name, rec_msg, rec_source))
                     existing_ids.add((rec_msg, rec_source))
 
@@ -1272,7 +1329,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: 2026-08-20-v9-title-line-fix")
+    print("🔖 BOT_CODE_VERSION: 2026-08-20-v11-group-only-source")
     print("=" * 60)
 
     init_db()
@@ -1288,7 +1345,7 @@ def main():
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
 
     application.add_handler(MessageHandler(
-        (filters.ChatType.CHANNEL | filters.ChatType.GROUPS) & (filters.Document.ALL | filters.AUDIO | filters.VIDEO),
+        filters.ChatType.GROUPS & (filters.Document.ALL | filters.AUDIO | filters.VIDEO),
         handle_new_upload
     ))
     application.add_handler(MessageHandler(
