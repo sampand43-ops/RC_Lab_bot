@@ -235,16 +235,25 @@ def get_words(normalized_text):
     return [w for w in normalized_text.split() if len(w) >= 2]
 
 
+DUPLICATE_UPLOAD_SUFFIX_PATTERN = re.compile(
+    r'\.(?:pdf|epub|zip|mobi|docx?|rar|txt)\.[0-9٠-٩]+$', re.IGNORECASE
+)
 EXTENSION_ONLY_PATTERN = re.compile(r'\.(pdf|epub|zip|mobi|docx?|rar|txt)$', re.IGNORECASE)
 
 
-def strip_extension_only(filename):
-    """يحذف امتداد الملف فقط (.pdf مثلاً) دون لمس أي رقم أو نص آخر في الاسم.
-    يُستخدم حصراً لحساب 'التطابق التام' الحقيقي، لأن ترك الامتداد ملتصقاً
-    (كـ 'فن حرب pdf' بدل 'فن حرب') كان يمنع أي تطابق تام من الأساس،
-    ويدفع كل طلب للاعتماد على مرحلة 'يبدأ بـ' الأوسع فيرسل كل الإصدارات المشابهة معاً."""
+def strip_duplicate_upload_suffix(filename):
+    """يحذف لاحقة النسخة من الاسم مثل .pdf.1 أو .pdf.2.
+    هذه ليست أجزاء من الكتاب، بل نسخ مكررة أنشأها اسم الملف/الأرشيف."""
     if not filename:
         return ""
+    return DUPLICATE_UPLOAD_SUFFIX_PATTERN.sub('', filename).strip()
+
+
+def strip_extension_only(filename):
+    """يحذف الامتداد، ويعامل .pdf.1/.pdf.2 كنسخ مكررة أولاً."""
+    if not filename:
+        return ""
+    filename = strip_duplicate_upload_suffix(filename)
     return EXTENSION_ONLY_PATTERN.sub('', filename).strip()
 
 
@@ -256,21 +265,33 @@ FORBIDDEN_PREFIXES = ["صور من", "قصص من", "مختصر", "شرح"]
 
 
 def dedupe_exact(records):
-    # التطبيع يزيل التشكيل وعلامات الترقيم والفواصل والرموز الزائدة،
-    # لذلك اختلافها في اسم الملف لا يجعل الكتاب نسخة جديدة.
-    seen = set()
-    deduped = []
+    """يحذف النسخ المتطابقة فعلياً، مع اختيار الاسم الأنظف عند وجود .pdf.1/.2..."""
+    best = {}
+    order = []
+
+    def quality(book_name):
+        title = get_title_line(book_name)
+        duplicate_suffix = bool(DUPLICATE_UPLOAD_SUFFIX_PATTERN.search(title))
+        parenthetical_copy = bool(TRAILING_PAREN_NUMBER_PATTERN.search(strip_extension_only(title)))
+        # نفضّل النسخة النظيفة على .pdf.1 أو (2)، ثم الاسم الأقصر.
+        return (duplicate_suffix, parenthetical_copy, len(title))
+
     for book_name, msg_id, source_chat_id in records:
         title_line = get_title_line(book_name)
         no_ext = strip_extension_only(title_line)
-        # (1)، (2)، ... في نهاية الاسم أرقام نسخ وليست أجزاء.
         no_dup_number = TRAILING_PAREN_NUMBER_PATTERN.sub('', no_ext).strip()
         key = normalize_arabic(no_dup_number)
-        if key in seen:
+        if not key:
             continue
-        seen.add(key)
-        deduped.append((book_name, msg_id, source_chat_id))
-    return deduped
+
+        item = (book_name, msg_id, source_chat_id)
+        if key not in best:
+            best[key] = item
+            order.append(key)
+        elif quality(item[0]) < quality(best[key][0]):
+            best[key] = item
+
+    return [best[key] for key in order]
 
 
 def build_alternates_map(records):
@@ -295,7 +316,11 @@ def get_core_title(raw_book_name):
     if not raw_book_name:
         return ""
     raw_book_name = get_title_line(raw_book_name)
+    raw_book_name = strip_duplicate_upload_suffix(raw_book_name)
+    # افصل اسم المؤلف أولاً، ثم أزل وسم الجزء حتى تتجمع كل الأجزاء تحت عنوان واحد.
     core_raw = CORE_TITLE_SPLIT_PATTERN.split(raw_book_name, maxsplit=1)[0].strip()
+    core_raw = PART_PATTERN.sub('', core_raw)
+    core_raw = TRAILING_NUM_PATTERN.sub('', core_raw)
     core_raw = strip_extension_only(core_raw)
     core_raw = TRAILING_PAREN_NUMBER_PATTERN.sub('', core_raw).strip()
     return normalize_arabic(core_raw)
@@ -1077,10 +1102,6 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
         if not sent:
             failed.append((book_name, msg_id, str(last_error)))
 
-        # تأخير ثابت 0.5 ثانية بين كل ملف والذي يليه (تجنّباً لحدود تيليجرام)، إلا إن
-        # كان هذا آخر عنصر فلا داعي للانتظار بعده
-        if i < len(valid_books) - 1:
-            await asyncio.sleep(0.5)
 
     if request_id:
         context.bot_data.get('active_sends', {}).pop(request_id, None)
@@ -1340,12 +1361,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     try:
         records, norm_names, norm_names_no_ext, norm_core_titles, index, core_index = await asyncio.to_thread(get_search_index)
 
-        # إذا كتب العضو اسم الكاتب وحده (بدون اسم كتاب)، لا نرسل أي ملف.
-        # طلب "كل كتب <الكاتب>" الصريح يبقى مساره الخاص كما هو.
-        if not is_author_request and is_author_only_query(norm_query, records):
-            await update.message.reply_text("⚠️ يرجى كتابة اسم الكتاب أيضاً، لا يكفي اسم المؤلف وحده.")
-            return
-
         if is_author_request:
             # وضع "كل كتب الكاتب": بحث احتوائي مقصود وواسع على الاسم الكامل (يشمل اسم المؤلف)
             results = [records[i] for i, nn in enumerate(norm_names) if norm_query in nn]
@@ -1361,6 +1376,13 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         results = await asyncio.to_thread(
             find_book_matches_indexed, norm_query, records, norm_names, norm_names_no_ext, norm_core_titles, core_index
         )
+
+        # أولوية البحث للكتاب: إذا كان الاسم عنوان كتاب فعلياً، نرسله حتى لو كان
+        # الاسم نفسه موجوداً أيضاً كاسم مؤلف في سجل آخر. لا نرفضه كـ"اسم مؤلف فقط"
+        # إلا إذا فشل البحث عن عنوان الكتاب أولاً.
+        if not results and not is_author_request and is_author_only_query(norm_query, records):
+            await update.message.reply_text("⚠️ يرجى كتابة اسم الكتاب أيضاً، لا يكفي اسم المؤلف وحده.")
+            return
 
         if not results:
             await update.message.reply_text(
@@ -1433,7 +1455,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: 2026-08-20-v12-copy-dedupe-stopbutton")
+    print("🔖 BOT_CODE_VERSION: 2026-08-20-v13-strict-dedupe-series-order")
     print("=" * 60)
 
     init_db()
