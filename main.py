@@ -90,6 +90,8 @@ ADMIN_HELP_TEXT = (
     "(⋮ ← Export chat history ← عطّل كل أنواع الوسائط ← Format: JSON)، "
     "ثم أرسل ملف `result.json` للبوت في الخاص.\n\n"
     "• *الأرشفة الآلية:* أي ملف جديد يُرفع في القناة أو كروب معتمد يُحفظ فوراً.\n\n"
+    "• *منع التكرار:* أي كتاب مكرر (بفارق تشكيل، فاصلة، اسم مؤلف، أو رقم نسخة بين "
+    "قوسين) يُتجاهل تلقائياً عند الأرشفة ولا يُخزَّن مرتين.\n\n"
     "• *لوحة التحكم:* أرسل `/panel` لأزرار الإحصائيات والحذف والبحث التشخيصي.\n\n"
     "• *البحث الحر في الخاص:* اكتب اسم الكتاب مباشرة دون أي شرط.\n\n"
     "━━━━━━ 👥 *للأعضاء* ━━━━━━\n\n"
@@ -108,6 +110,8 @@ def init_db():
             book_name TEXT,
             msg_id INTEGER,
             source_chat_id INTEGER DEFAULT -1004395670008,
+            dedup_key TEXT,
+            part_number INTEGER DEFAULT 0,
             UNIQUE(msg_id, source_chat_id)
         )
     """)
@@ -122,14 +126,104 @@ def init_db():
 
 
 def migrate_db():
+    """يضيف الأعمدة الناقصة لقواعد بيانات قديمة، ثم (لمرة واحدة فقط، إن لزم) يحسب
+    dedup_key و part_number لكل السجلات القديمة، يحذف التكرارات المكتشفة، وأخيراً
+    يُنشئ فهرس UNIQUE يمنع أي تكرار جديد من الدخول للأرشيف من الأساس مستقبلاً."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(archive)")
     columns = [col[1] for col in cursor.fetchall()]
+
     if "source_chat_id" not in columns:
         cursor.execute(f"ALTER TABLE archive ADD COLUMN source_chat_id INTEGER DEFAULT {CHANNEL_ID}")
         conn.commit()
+    if "dedup_key" not in columns:
+        cursor.execute("ALTER TABLE archive ADD COLUMN dedup_key TEXT")
+        conn.commit()
+    if "part_number" not in columns:
+        cursor.execute("ALTER TABLE archive ADD COLUMN part_number INTEGER DEFAULT 0")
+        conn.commit()
+
+    cursor.execute("SELECT COUNT(*) FROM archive WHERE dedup_key IS NULL")
+    pending = cursor.fetchone()[0]
     conn.close()
+
+    if pending > 0:
+        _backfill_and_deduplicate(pending)
+    else:
+        _ensure_dedup_unique_index()
+
+
+def _backfill_and_deduplicate(pending_count):
+    """يُشغَّل تلقائياً مرة واحدة فقط (عند أول إقلاع بعد هذا التحديث، أو على أي سجلات
+    جديدة نادراً ما تصل بدون المفتاح لأي سبب): يحسب dedup_key و part_number لكل سجل
+    ينقصه، ثم يحذف التكرارات (يُبقي سجلاً واحداً فقط لكل توليفة كتاب+جزء، ويُفضّل
+    أطول اسم لأنه غالباً الأكثر اكتمالاً/يحتوي اسم المؤلف)، وأخيراً يُفعّل فهرس
+    UNIQUE يمنع دخول أي تكرار جديد مستقبلاً من الأساس دون أي فحص وقت البحث."""
+    print(f"🔧 ترحيل لمرة واحدة: حساب مفاتيح عدم التكرار لـ {pending_count} سجلاً...")
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, book_name FROM archive WHERE dedup_key IS NULL")
+    rows = cursor.fetchall()
+
+    updates = []
+    for row_id, book_name in rows:
+        dedup_key, part_number = compute_dedup_fields(book_name or "")
+        updates.append((dedup_key, part_number, row_id))
+
+    cursor.executemany("UPDATE archive SET dedup_key = ?, part_number = ? WHERE id = ?", updates)
+    conn.commit()
+    print("✅ تم حساب المفاتيح لجميع السجلات.")
+
+    cursor.execute(
+        "SELECT dedup_key, part_number, id, book_name FROM archive "
+        "WHERE dedup_key IS NOT NULL ORDER BY dedup_key, part_number"
+    )
+    all_rows = cursor.fetchall()
+
+    grouped = defaultdict(list)
+    for dedup_key, part_number, row_id, book_name in all_rows:
+        grouped[(dedup_key, part_number)].append((row_id, book_name or ""))
+
+    ids_to_delete = []
+    for key, items in grouped.items():
+        if len(items) <= 1:
+            continue
+        items.sort(key=lambda x: len(x[1]), reverse=True)  # أطول اسم = الأكثر اكتمالاً، نُبقيه
+        for row_id, _ in items[1:]:
+            ids_to_delete.append(row_id)
+
+    if ids_to_delete:
+        print(f"🗑️ حذف {len(ids_to_delete)} سجلاً مكرراً من أصل {len(all_rows)}...")
+        CHUNK = 500
+        for i in range(0, len(ids_to_delete), CHUNK):
+            chunk = ids_to_delete[i:i + CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            cursor.execute(f"DELETE FROM archive WHERE id IN ({placeholders})", chunk)
+            conn.commit()
+        print("✅ تم حذف التكرارات.")
+    else:
+        print("ℹ️ لا توجد تكرارات لحذفها.")
+
+    conn.close()
+    _ensure_dedup_unique_index()
+
+
+def _ensure_dedup_unique_index():
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_archive_dedup ON archive(dedup_key, part_number)"
+        )
+        conn.commit()
+        print("✅ فهرس منع التكرار (dedup_key, part_number) فعّال الآن — لن يدخل أي تكرار جديد للأرشيف.")
+    except sqlite3.IntegrityError as e:
+        # نادراً قد تبقى تكرارات (مثلاً عدة سجلات بلا اسم صالح إطلاقاً) — لا نوقف
+        # تشغيل البوت بسببها، فقط نُبلغ بالسجلات لمراجعتها يدوياً لاحقاً إن لزم
+        print(f"⚠️ تعذّر تفعيل فهرس منع التكرار بالكامل بسبب تكرارات متبقية: {e}")
+    finally:
+        conn.close()
 
 
 def is_group_approved(chat_id: int) -> bool:
@@ -155,34 +249,40 @@ PART_PATTERN = re.compile(
     r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)',
     re.IGNORECASE
 )
-# رقم واحد فقط (1-9) في نهاية الاسم يُعتبر "رقم جزء محتمل".
-# الرقم داخل قوسين في نهاية الاسم مثل "اسم الكتاب (2)" ليس جزءاً،
-# بل يُعامل كنسخة مكررة من الكتاب نفسه.
+# مهم جداً: رقم واحد فقط (1-9) في نهاية الاسم يُعتبر "رقم جزء محتمل".
+# لا نسمح بأرقام أطول لأنها غالباً معرّفات عشوائية (IDs) لا علاقة لها بترقيم الأجزاء.
 TRAILING_NUM_PATTERN = re.compile(r'[\s\-_]([0-9٠-٩])\s*(?:\.pdf|\.epub|\.zip)?$')
-TRAILING_PAREN_NUMBER_PATTERN = re.compile(
-    r'\s*\(\s*[0-9٠-٩]+\s*\)\s*(?=(?:\.pdf|\.epub|\.zip|\.mobi|\.docx?|\.rar|\.txt)?$)',
+
+# رقم بين قوسين هلالية في نهاية الاسم (مثال: "الكتاب (2).pdf") يُعتبر "علامة تكرار/نسخة"
+# فقط (رفعة ثانية لنفس الكتاب) — وليس رقم جزء إطلاقاً. يُحذف تماماً قبل أي معالجة أخرى
+# حتى لا يمنع اعتبار "الكتاب" و"الكتاب (2)" نفس الكتاب.
+TRAILING_PAREN_NUM_PATTERN = re.compile(
+    r'\s*\(\s*[0-9٠-٩]+\s*\)\s*(?:\.pdf|\.epub|\.zip|\.mobi|\.docx?)?$',
     re.IGNORECASE
 )
 
 
 def get_title_line(raw_book_name):
-    """يأخذ السطر الأول فقط من اسم الكتاب المخزَّن.
-    هذا مهم لأن بعض الكتب أُرشفت من رسائل نصية طويلة (كابشن فيه العنوان بالسطر الأول
-    ثم وصف/تفاصيل إضافية بالأسطر التالية) بدل اسم ملف حقيقي بسطر واحد. سابقاً كان
-    اسم الكتاب المخزَّن = النص الكامل بكل أسطره، فكان أي بحث بعنوان دقيق (مثل
-    'الصداقة' أو 'البنت والاسد') يفشل لأن العنوان الكامل المخزَّن لم يكن يساوي أو
-    حتى يحتوي كلمات مطابقة تماماً بسبب الوصف الإضافي الملتصق به. بأخذ السطر الأول
-    فقط عند حساب مفاتيح المطابقة (وليس عند العرض)، يعود العنوان الفعلي مطابقاً."""
+    """يأخذ السطر الأول فقط من اسم الكتاب المخزَّن (بعض الكتب أُرشفت من كابشن طويل:
+    عنوان بالسطر الأول ثم وصف بالأسطر التالية)."""
     if not raw_book_name:
         return raw_book_name
     first = raw_book_name.split('\n', 1)[0].strip()
     return first if first else raw_book_name
 
 
+def strip_duplicate_marker(text):
+    """يحذف رقم النسخة بين قوسين هلالية من نهاية الاسم (علامة تكرار فقط، ليس جزءاً)."""
+    if not text:
+        return text
+    return TRAILING_PAREN_NUM_PATTERN.sub('', text).strip()
+
+
 def extract_part_number(filename):
     if not filename:
         return None
     filename = get_title_line(filename)
+    filename = strip_duplicate_marker(filename)
     match = PART_PATTERN.search(filename)
     if match:
         val = match.group(2)
@@ -203,6 +303,7 @@ def strip_part_pattern(filename):
     if not filename:
         return ""
     filename = get_title_line(filename)
+    filename = strip_duplicate_marker(filename)
     stripped = PART_PATTERN.sub('', filename)
     stripped = TRAILING_NUM_PATTERN.sub('', stripped)
     stripped = re.sub(r'\.(pdf|epub|zip|mobi|docx?)$', '', stripped, flags=re.IGNORECASE)
@@ -235,26 +336,38 @@ def get_words(normalized_text):
     return [w for w in normalized_text.split() if len(w) >= 2]
 
 
-DUPLICATE_UPLOAD_SUFFIX_PATTERN = re.compile(
-    r'\.(?:pdf|epub|zip|mobi|docx?|rar|txt)\.[0-9٠-٩]+$', re.IGNORECASE
-)
 EXTENSION_ONLY_PATTERN = re.compile(r'\.(pdf|epub|zip|mobi|docx?|rar|txt)$', re.IGNORECASE)
 
 
-def strip_duplicate_upload_suffix(filename):
-    """يحذف لاحقة النسخة من الاسم مثل .pdf.1 أو .pdf.2.
-    هذه ليست أجزاء من الكتاب، بل نسخ مكررة أنشأها اسم الملف/الأرشيف."""
-    if not filename:
-        return ""
-    return DUPLICATE_UPLOAD_SUFFIX_PATTERN.sub('', filename).strip()
-
-
 def strip_extension_only(filename):
-    """يحذف الامتداد، ويعامل .pdf.1/.pdf.2 كنسخ مكررة أولاً."""
+    """يحذف امتداد الملف فقط (.pdf مثلاً) دون لمس أي رقم أو نص آخر في الاسم."""
     if not filename:
         return ""
-    filename = strip_duplicate_upload_suffix(filename)
     return EXTENSION_ONLY_PATTERN.sub('', filename).strip()
+
+
+CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s+[-–—]\s*|\s*[-–—]\s+')
+
+
+def compute_dedup_fields(raw_book_name):
+    """يحسب (dedup_key, part_number) لكتاب معيّن — يُستدعى مرة واحدة فقط وقت
+    الأرشفة (رفعة جديدة أو استيراد JSON)، وليس عند كل بحث. هذا هو أساس منع
+    التكرار الجديد بالكامل.
+
+    dedup_key = العنوان الجوهري بعد حذف: علامة رقم النسخة بين قوسين، اسم/رقم
+    الجزء، اسم المؤلف (كل ما بعد أول شرطة)، الامتداد، ثم تطبيع النص (حذف
+    التشكيل والفواصل وتوحيد الحروف). بهذا فإن 'الكتاب.pdf' و'الكتاب (2).pdf'
+    و'الكتاب - المؤلف.pdf' الثلاثة تُعطي نفس dedup_key فتُعتبر نفس الكتاب.
+
+    part_number = رقم الجزء الحقيقي إن وُجد صراحة في الاسم (0 يعني لا يوجد جزء).
+    'الكتاب الجزء الأول' و'الكتاب الجزء الثاني' يُعطيان نفس dedup_key لكن
+    part_number مختلف، فيبقيان سجلّين منفصلين — وهذا هو الاستثناء المطلوب للأجزاء."""
+    part_number = extract_part_number(raw_book_name) or 0
+    title_no_part = strip_part_pattern(raw_book_name)  # قد يبقى فيه اسم المؤلف
+    core = CORE_TITLE_SPLIT_PATTERN.split(title_no_part, maxsplit=1)[0].strip()
+    core = strip_extension_only(core)
+    dedup_key = normalize_arabic(core)
+    return dedup_key, part_number
 
 
 AUTHOR_REQUEST_PATTERNS = [
@@ -264,143 +377,25 @@ AUTHOR_REQUEST_PATTERNS = [
 FORBIDDEN_PREFIXES = ["صور من", "قصص من", "مختصر", "شرح"]
 
 
-def dedupe_exact(records):
-    """توحيد النسخ المتطابقة فعلياً، مع تفضيل الاسم الأنظف."""
-    best = {}
-
-    def quality(book_name):
-        title = get_title_line(book_name)
-        duplicate_suffix = bool(DUPLICATE_UPLOAD_SUFFIX_PATTERN.search(title))
-        parenthetical_copy = bool(TRAILING_PAREN_NUMBER_PATTERN.search(strip_extension_only(title)))
-        # الاسم الأقصر عادةً هو النسخة الأنظف (بدون اسم مؤلف/وصف إضافي).
-        return (duplicate_suffix, parenthetical_copy, len(title))
-
-    for item in records:
-        book_name = item[0]
-        key = normalize_arabic(
-            TRAILING_PAREN_NUMBER_PATTERN.sub('', strip_extension_only(
-                strip_duplicate_upload_suffix(get_title_line(book_name))
-            )).strip()
-        )
-        if not key:
-            continue
-        if key not in best or quality(book_name) < quality(best[key][0]):
-            best[key] = item
-
-    return list(best.values())
-
-
-def build_alternates_map(records):
-    """يبني خريطة (اسم مُطبَّع -> كل النسخ الممكنة له) من نتائج غير مُنقّاة من التكرار،
-    تُستخدم لإعادة المحاولة تلقائياً بنسخة بديلة إن فشلت النسخة الأساسية عند الإرسال
-    (مثلاً: رسالة محذوفة من القناة، بينما نسخة أخرى بنفس الاسم لا تزال موجودة)."""
-    alternates = defaultdict(list)
-    for book_name, msg_id, source_chat_id in records:
-        key = normalize_arabic(book_name)
-        alternates[key].append((msg_id, source_chat_id))
-    return alternates
-
-
-CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s+[-–—]\s*|\s*[-–—]\s+')
-
-
-def get_core_title(raw_book_name):
-    """يرجع المفتاح الموحد للكتاب/السلسلة لمنع التكرار.
-    يتجاهل: التشكيل والرموز والفواصل، اسم المؤلف الملحق بعد شرطة،
-    لاحقات الرفع مثل .pdf.1، والرقم بين قوسين في نهاية الاسم، ووسم الجزء.
-    """
-    if not raw_book_name:
-        return ""
-    name = get_title_line(raw_book_name).strip()
-    name = strip_duplicate_upload_suffix(name)
-    name = strip_extension_only(name)
-    name = TRAILING_PAREN_NUMBER_PATTERN.sub('', name).strip()
-    # اسم المؤلف بعد شرطة لا يغيّر هوية الكتاب.
-    name = CORE_TITLE_SPLIT_PATTERN.split(name, maxsplit=1)[0].strip()
-    # إزالة وسم الجزء بعد فصل اسم المؤلف.
-    name = PART_PATTERN.sub(' ', name)
-    name = TRAILING_NUM_PATTERN.sub('', name).strip()
-    name = TRAILING_PAREN_NUMBER_PATTERN.sub('', name).strip()
-    return normalize_arabic(name)
-
-
-def build_core_alternates_map(records):
-    """خريطة بدائل أوسع مبنية على العنوان الجوهري (بدون اسم المؤلف/الوصف الإضافي)،
-    تُستخدم كطبقة أخيرة لإعادة المحاولة بعد استنفاد البدائل الدقيقة (نفس الاسم تماماً)."""
-    alternates = defaultdict(list)
-    for book_name, msg_id, source_chat_id in records:
-        core = get_core_title(book_name)
-        alternates[core].append((msg_id, source_chat_id))
-    return alternates
-
-
-def group_into_series(records):
-    groups = defaultdict(list)
-    for item in records:
-        base_key = get_core_title(item[0])
-        if base_key:
-            groups[base_key].append(item)
-    return groups
-
-
-def reduce_to_unique_parts(records):
-    """قاعدة الإرسال النهائية:
-    - نسخة واحدة فقط للكتاب نفسه.
-    - .pdf.1/.pdf.2 و(1)/(2) ليست أجزاء.
-    - اسم المؤلف المضاف لا يصنع نسخة جديدة.
-    - الأجزاء الحقيقية تُرتب 1 ثم 2 ثم 3...
-    """
-    groups = group_into_series(records)
-    final_books = []
-
-    def quality(book_name):
-        title = get_title_line(book_name)
-        duplicate_suffix = bool(DUPLICATE_UPLOAD_SUFFIX_PATTERN.search(title))
-        parenthetical_copy = bool(TRAILING_PAREN_NUMBER_PATTERN.search(strip_extension_only(title)))
-        has_author_suffix = bool(CORE_TITLE_SPLIT_PATTERN.search(strip_extension_only(
-            strip_duplicate_upload_suffix(title)
-        )))
-        return (duplicate_suffix, parenthetical_copy, has_author_suffix, len(title))
-
-    for base_key, items in groups.items():
-        # نختار نسخة واحدة فقط لكل رقم جزء.
-        chosen = {}
-        for item in items:
-            part_num = extract_part_number(item[0])
-            bucket = 0 if part_num is None else part_num
-            if bucket not in chosen or quality(item[0]) < quality(chosen[bucket][0]):
-                chosen[bucket] = item
-
-        for bucket in sorted(chosen):
-            final_books.append(chosen[bucket])
-
-    return final_books
-
-
 # ==================== فهرس البحث المُخزَّن مؤقتاً ====================
+# ملاحظة مهمة: بما أن التكرار أصبح مستحيلاً على مستوى قاعدة البيانات (فهرس UNIQUE
+# على dedup_key + part_number)، فإن الفهرس هنا يُبنى مباشرة حسب dedup_key: كل مفتاح
+# فريد = كتاب واحد، وكل أجزائه (إن وُجدت) مرتبة ومجمّعة معه سلفاً. لا حاجة بعد الآن
+# لأي منطق حذف تكرار أو "تجميع سلسلة" وقت البحث — البيانات نظيفة من مصدرها.
 
 _search_index_cache = {
-    "fingerprint": None, "records": [], "norm_names": [], "norm_names_no_ext": [],
-    "norm_core_titles": [], "index": {}, "core_index": {}
+    "fingerprint": None, "keys": [], "groups": {},
+    "norm_names": [], "norm_names_no_ext": [], "core_index": {}
 }
 
 
 def get_search_index():
-    """يُرجع (records, norm_names, norm_names_no_ext, norm_core_titles, index, core_index).
-    - norm_names: السطر الأول من الاسم بعد التطبيع (بما فيه الامتداد إن وُجد ضمنه)، لمرحلة
-      'يبدأ بـ' (تشمل اسم المؤلف إن وُجد، فيعمل طلب 'العنوان + اسم المؤلف معاً' بشكل صحيح).
-    - norm_names_no_ext: السطر الأول بعد حذف الامتداد فقط، لمرحلة التطابق التام الأساسية.
-    - norm_core_titles: العنوان الجوهري فقط (بعد حذف '- اسم المؤلف' والامتداد، من السطر
-      الأول حصراً)، يُستخدم في مرحلة تطابق تام إضافية تسمح بطلب العنوان وحده حتى لو كان
-      مخزَّناً مع اسم المؤلف (يعمل حتى مع كلمة واحدة، بأمان، لأنه تطابق تام حصراً وليس احتواءً).
-    - index: فهرس الكلمات من الاسم الكامل (السطر الأول)، لمرحلة 'يبدأ بـ' فقط عبر norm_names
-      (غير مُستخدم مباشرة، محفوظ للتوافق).
-    - core_index: فهرس الكلمات من العنوان الجوهري فقط (بدون اسم المؤلف) — يمنع طلب اسم المؤلف
-      وحده (بدون عنوان) من مطابقة كل كتبه عبر مرحلتي 'كل الكلمات' و'التقريبي'.
-
-    ملاحظة مهمة: العمل على 'السطر الأول' فقط (عبر get_title_line) بدل النص الكامل المخزَّن
-    يحل مشكلة كتب أُرشفت من رسائل نصية طويلة (كابشن بعدة أسطر: عنوان ثم وصف) والتي كانت
-    تفشل في المطابقة التامة رغم وجودها فعلياً في الأرشيف."""
+    """يُرجع (keys, groups, norm_names, norm_names_no_ext, core_index).
+    - keys: قائمة dedup_key الفريدة.
+    - groups[key]["parts"]: كل (book_name, msg_id, source_chat_id, part_number) لهذا الكتاب.
+    - groups[key]["display_name"]: أطول اسم بين أجزائه (للعرض والبحث بالاسم+المؤلف).
+    - norm_names / norm_names_no_ext: الاسم التمثيلي مطبّعاً، بحسب ترتيب keys.
+    - core_index: كلمة -> مجموعة مواضع (indices في keys) من dedup_key نفسه."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM archive")
@@ -409,97 +404,87 @@ def get_search_index():
     if _search_index_cache["fingerprint"] == fingerprint:
         conn.close()
         c = _search_index_cache
-        return (c["records"], c["norm_names"], c["norm_names_no_ext"], c["norm_core_titles"], c["index"], c["core_index"])
+        return (c["keys"], c["groups"], c["norm_names"], c["norm_names_no_ext"], c["core_index"])
 
-    cursor.execute("SELECT book_name, msg_id, source_chat_id FROM archive GROUP BY msg_id, source_chat_id")
-    raw_records = cursor.fetchall()
+    cursor.execute(
+        "SELECT book_name, msg_id, source_chat_id, dedup_key, part_number FROM archive "
+        "WHERE dedup_key IS NOT NULL ORDER BY dedup_key, part_number"
+    )
+    rows = cursor.fetchall()
     conn.close()
 
     norm_forbidden = [normalize_arabic(p) for p in FORBIDDEN_PREFIXES]
 
-    records, norm_names, norm_names_no_ext, norm_core_titles = [], [], [], []
-    index = defaultdict(set)
-    core_index = defaultdict(set)
-
-    for book_name, msg_id, source_chat_id in raw_records:
-        norm_name_full = normalize_arabic(book_name)
-        if any(norm_name_full.startswith(p) for p in norm_forbidden):
+    keys = []
+    groups = {}
+    for book_name, msg_id, source_chat_id, dedup_key, part_number in rows:
+        norm_full = normalize_arabic(book_name)
+        if any(norm_full.startswith(p) for p in norm_forbidden):
             continue
+        if dedup_key not in groups:
+            groups[dedup_key] = {"parts": [], "display_name": book_name}
+            keys.append(dedup_key)
+        elif len(book_name) > len(groups[dedup_key]["display_name"]):
+            groups[dedup_key]["display_name"] = book_name
+        groups[dedup_key]["parts"].append((book_name, msg_id, source_chat_id, part_number))
 
-        title_line = get_title_line(book_name)
-        norm_name = normalize_arabic(title_line)
-
-        i = len(records)
-        records.append((book_name, msg_id, source_chat_id))
-        norm_names.append(norm_name)
+    norm_names, norm_names_no_ext = [], []
+    core_index = defaultdict(set)
+    for i, k in enumerate(keys):
+        title_line = get_title_line(groups[k]["display_name"])
+        norm_names.append(normalize_arabic(title_line))
         norm_names_no_ext.append(normalize_arabic(strip_extension_only(title_line)))
-        core_title = get_core_title(book_name)
-        norm_core_titles.append(core_title)
-
-        for w in get_words(norm_name):
-            index[w].add(i)
-        for w in get_words(core_title):
+        for w in get_words(k):
             core_index[w].add(i)
 
     _search_index_cache.update(
-        fingerprint=fingerprint, records=records, norm_names=norm_names,
-        norm_names_no_ext=norm_names_no_ext, norm_core_titles=norm_core_titles,
-        index=index, core_index=core_index
+        fingerprint=fingerprint, keys=keys, groups=groups,
+        norm_names=norm_names, norm_names_no_ext=norm_names_no_ext, core_index=core_index
     )
-    return records, norm_names, norm_names_no_ext, norm_core_titles, index, core_index
+    return keys, groups, norm_names, norm_names_no_ext, core_index
 
 
-def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext, norm_core_titles, core_index):
+def find_book_matches_indexed(norm_query, keys, norm_names, norm_names_no_ext, core_index):
     """
-    بحث دقيق بأولويات صارمة:
-    1) تطابق تام للاسم الكامل (بعد حذف الامتداد فقط)
-       أو تطابق تام للعنوان الجوهري (بعد حذف '- اسم المؤلف' أيضاً) — يعمل حتى بكلمة واحدة،
-       لأنه تطابق تام حصراً، فيسمح بطلب العنوان وحده حتى لو خُزِّن مع اسم المؤلف
-       (مثال: 'الصداقة' تُطابق 'الصداقة - فلان.pdf').
-    2) (كلمتان فأكثر) الاسم الكامل (بامتداده، ويشمل اسم المؤلف إن وُجد) يبدأ بنص الطلب بالكامل
-       — يسمح بطلب 'العنوان + اسم المؤلف معاً'.
-    3) (كلمتان فأكثر) كل كلمات الطلب موجودة في العنوان الجوهري فقط (بدون اسم المؤلف) —
-       يمنع طلب اسم المؤلف وحده (بدون عنوان) من مطابقة كل كتبه بالخطأ.
-    4) (كلمتان فأكثر، وكل كلمة 3 أحرف فأكثر) تطابق تقريبي صارم على العنوان الجوهري فقط.
+    بحث دقيق بأولويات صارمة، يُرجع قائمة dedup_key المطابقة:
+    1) تطابق تام للاسم التمثيلي (بدون امتداد) أو لـ dedup_key نفسه — يعمل حتى بكلمة واحدة.
+    2) (كلمتان فأكثر) الاسم التمثيلي الكامل (يشمل اسم المؤلف) يبدأ بنص الطلب بالكامل.
+    3) (كلمتان فأكثر) كل كلمات الطلب موجودة داخل dedup_key (العنوان الجوهري فقط، بدون
+       اسم المؤلف) — يمنع طلب اسم المؤلف وحده من مطابقة كل كتبه بالخطأ.
+    4) (كلمتان فأكثر، وكل كلمة 3 أحرف فأكثر) تطابق تقريبي صارم على dedup_key فقط.
     """
     query_words = get_words(norm_query)
 
-    exact = [
-        records[i] for i, nn in enumerate(norm_names_no_ext)
-        if nn == norm_query or norm_core_titles[i] == norm_query
-    ]
-    if exact:
-        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE1(exact/core) -> {[r[0] for r in exact]}")
-        return exact
+    exact_idx = set(i for i, nn in enumerate(norm_names_no_ext) if nn == norm_query)
+    exact_idx |= set(i for i, k in enumerate(keys) if k == norm_query)
+    if exact_idx:
+        result = [keys[i] for i in exact_idx]
+        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE1(exact) -> {result}")
+        return result
 
     if len(query_words) < 2:
         print(f"🔎 SEARCH[{norm_query!r}] -> كلمة واحدة، لا تطابق تام -> فارغ")
         return []
 
-    startswith_matches = [records[i] for i, nn in enumerate(norm_names) if nn.startswith(norm_query)]
-    if startswith_matches:
-        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE2(startswith) -> {[r[0] for r in startswith_matches]}")
-        return startswith_matches
+    startswith_idx = [i for i, nn in enumerate(norm_names) if nn.startswith(norm_query)]
+    if startswith_idx:
+        result = [keys[i] for i in startswith_idx]
+        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE2(startswith) -> {result}")
+        return result
 
     word_sets = [core_index.get(qw) for qw in query_words]
     if all(word_sets):
         common = set.intersection(*word_sets)
         if common:
-            result = [records[i] for i in common]
-            print(f"🔎 SEARCH[{norm_query!r}] -> STAGE3(all words in core title) -> {[r[0] for r in result]}")
+            result = [keys[i] for i in common]
+            print(f"🔎 SEARCH[{norm_query!r}] -> STAGE3(all words in dedup_key) -> {result}")
             return result
 
-    if any(len(qw) < 3 for qw in query_words):
-        print(f"🔎 SEARCH[{norm_query!r}] -> كلمة قصيرة موجودة، تشابه أكثر صرامة (90%)")
-        cutoff = 0.9
-    else:
-        cutoff = 0.85
+    cutoff = 0.9 if any(len(qw) < 3 for qw in query_words) else 0.85
 
     vocabulary = list(core_index.keys())
     per_word_candidates = []
     for qw in query_words:
-        # الكلمات القصيرة جداً (أقل من 3 أحرف) لا تخضع للتقريب إطلاقاً — يجب أن تُطابق بحروفها بالضبط
-        # (منع مشاكل مثل مطابقة "فن" مع كلمات أخرى قصيرة غير مرتبطة إطلاقاً)
         if len(qw) < 3:
             if qw not in core_index:
                 print(f"🔎 SEARCH[{norm_query!r}] -> كلمة قصيرة '{qw}' غير موجودة حرفياً -> فارغ")
@@ -516,9 +501,21 @@ def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext
         per_word_candidates.append(word_candidates)
 
     common = set.intersection(*per_word_candidates) if per_word_candidates else set()
-    result = [records[i] for i in common]
-    print(f"🔎 SEARCH[{norm_query!r}] -> STAGE4(تقريبي على العنوان الجوهري) -> {[r[0] for r in result]}")
+    result = [keys[i] for i in common]
+    print(f"🔎 SEARCH[{norm_query!r}] -> STAGE4(تقريبي) -> {result}")
     return result
+
+
+def flatten_matched_keys(matched_keys, groups):
+    """يحوّل قائمة dedup_key مطابقة إلى قائمة (book_name, msg_id, source_chat_id)
+    جاهزة للإرسال، بحيث تكون أجزاء كل كتاب مرتبة تصاعدياً حسب part_number المخزَّن
+    فعلياً بقاعدة البيانات (رقم ثابت، وليس محسوباً لحظياً) — فلا يعود ترتيب
+    الأجزاء عرضة للاختلال بين طلب وآخر."""
+    out = []
+    for k in matched_keys:
+        parts = sorted(groups.get(k, {}).get("parts", []), key=lambda p: p[3])
+        out.extend((bn, mid, src) for (bn, mid, src, _pn) in parts)
+    return out
 
 
 # ==================== معالجات الكروبات ====================
@@ -592,8 +589,7 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if chat is None:
         return
     # المصدر الوحيد المعتمد للأرشفة التلقائية الآن هو الكروب الرئيسي (وأي كروب آخر
-    # يُضاف ويُعتمد يدوياً عبر allowed_groups). القناة لم تعد مصدراً — أي ملف يُرفع
-    # إليها لا يُؤرشف تلقائياً بعد الآن.
+    # يُضاف ويُعتمد يدوياً عبر allowed_groups).
     if chat.id != GROUP_ID and not is_group_approved(chat.id):
         return
 
@@ -602,18 +598,22 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     book_name = document.file_name or message.caption or f"Book_{message.message_id}"
+    dedup_key, part_number = compute_dedup_fields(book_name)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "INSERT INTO archive (book_name, msg_id, source_chat_id) VALUES (?, ?, ?)",
-            (book_name, message.message_id, chat.id)
+            "INSERT INTO archive (book_name, msg_id, source_chat_id, dedup_key, part_number) VALUES (?, ?, ?, ?, ?)",
+            (book_name, message.message_id, chat.id, dedup_key, part_number)
         )
         conn.commit()
         print(f"✅ أُرشف تلقائياً: '{book_name}' (msg_id={message.message_id}, chat={chat.id})")
-    except sqlite3.IntegrityError:
-        print(f"ℹ️ الكتاب '{book_name}' مؤرشف مسبقاً بنفس رقم الرسالة، تم التجاهل.")
+    except sqlite3.IntegrityError as e:
+        # إما نفس الرسالة أُرشفت من قبل، أو (الحالة الجديدة) نفس الكتاب/الجزء مؤرشف
+        # مسبقاً باسم مختلف قليلاً (تشكيل/فاصلة/اسم مؤلف/رقم نسخة بين قوسين) — كلاهما
+        # يُتجاهل الآن تلقائياً بفضل فهرس UNIQUE(dedup_key, part_number).
+        print(f"ℹ️ '{book_name}' مكرر (رسالة أو محتوى) ولم يُخزَّن مرة أخرى: {e}")
     except Exception as e:
         print(f"❌ فشلت أرشفة '{book_name}' تلقائياً: {e}")
     finally:
@@ -630,11 +630,6 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not document or not document.file_name.endswith('.json'):
         return
 
-    # حدّ تحميل الملفات عبر Bot API هو 20 ميجابايت بالضبط — وهذا قيد ثابت من تيليجرام
-    # نفسه (خاص بالبوتات فقط، ولا علاقة له بحد الـ 2/4 جيجابايت المسموح للمستخدمين
-    # العاديين)، ولا يمكن تجاوزه إلا بتشغيل "Local Bot API Server" خاص (بنية تحتية
-    # منفصلة تماماً، غير متاحة على Railway بالإعداد الحالي). لذلك نتحقق من الحجم
-    # *قبل* محاولة التحميل أصلاً بدل ترك الخطأ يظهر بشكل مبهم لاحقاً.
     BOT_API_MAX_DOWNLOAD = 20 * 1024 * 1024
     if document.file_size and document.file_size > BOT_API_MAX_DOWNLOAD:
         size_mb = document.file_size / (1024 * 1024)
@@ -651,11 +646,6 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
         return
 
-    # الكابشن (إن وُجد) يبقى تجاوزاً يدوياً اختيارياً لمن يريد فرض مصدر معيّن،
-    # لكنه لم يعد الاعتماد الأساسي — لأن نسيان كتابته كان يتسبب بأرشفة كل كتب
-    # الكروب (رسائل بأرقام ضخمة تصل لمئات الآلاف) على أنها من القناة افتراضياً،
-    # فيفشل تحويلها لاحقاً بخطأ "Message to forward not found" لأن رقم الرسالة
-    # غير موجود أصلاً في القناة.
     caption = update.message.caption
     forced_source_chat_id = None
     if caption:
@@ -685,11 +675,6 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
-        # اكتشاف المصدر الحقيقي تلقائياً من الملف نفسه: تصدير Telegram Desktop يضع
-        # في جذر الـ JSON حقل "id" وهو معرّف الشات الداخلي (بدون البادئة -100)،
-        # ونفس الصيغة التي يستخدمها Bot API لأي قناة أو سوبر-كروب هي:
-        # chat_id = -100<id>. هذا يطابق تماماً GROUP_ID و CHANNEL_ID الحاليين،
-        # فنحسب المصدر مباشرة من الملف بدل تخمينه أو الاعتماد على تذكّر الأدمن.
         auto_detected_source_id = None
         raw_json_id = data.get("id")
         if isinstance(raw_json_id, int):
@@ -731,6 +716,7 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
             return book_name
 
         batch, BATCH_SIZE, processed, last_percent = [], 2000, 0, -1
+        skipped_duplicates = 0
 
         for msg in messages:
             processed += 1
@@ -738,11 +724,15 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
                 msg_id = msg.get("id")
                 if msg_id is not None:
                     book_name = extract_book_name(msg) or f"Book_{msg_id}"
-                    batch.append((book_name, msg_id, source_chat_id))
+                    dedup_key, part_number = compute_dedup_fields(book_name)
+                    batch.append((book_name, msg_id, source_chat_id, dedup_key, part_number))
 
             if len(batch) >= BATCH_SIZE:
+                cursor.execute("SELECT changes()")
+                before = cursor.fetchone()[0]
                 cursor.executemany(
-                    "INSERT OR IGNORE INTO archive (book_name, msg_id, source_chat_id) VALUES (?, ?, ?)", batch
+                    "INSERT OR IGNORE INTO archive (book_name, msg_id, source_chat_id, dedup_key, part_number) "
+                    "VALUES (?, ?, ?, ?, ?)", batch
                 )
                 conn.commit()
                 batch.clear()
@@ -757,7 +747,8 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         if batch:
             cursor.executemany(
-                "INSERT OR IGNORE INTO archive (book_name, msg_id, source_chat_id) VALUES (?, ?, ?)", batch
+                "INSERT OR IGNORE INTO archive (book_name, msg_id, source_chat_id, dedup_key, part_number) "
+                "VALUES (?, ?, ?, ?, ?)", batch
             )
             conn.commit()
 
@@ -770,6 +761,8 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
             f"✅ تمت الأرشفة بنجاح!\n"
             f"الرسائل المفحوصة: `{total_msgs}`\n"
             f"إجمالي الكتب المؤرشفة الآن لهذا المصدر: `{final_count}`\n\n"
+            f"💡 أي كتاب مكرر (بفارق تشكيل/فاصلة/اسم مؤلف/رقم نسخة بين قوسين، أو حتى "
+            f"مكرر من مصدر آخر) تم تجاوزه تلقائياً ولم يُخزَّن مرتين.\n\n"
             f"💡 لديك أجزاء أخرى؟ أرسلها الآن واحداً تلو الآخر."
         )
     except Exception as e:
@@ -849,22 +842,18 @@ def generate_archive_pdf(output_path):
         from bidi.algorithm import get_display
 
     def safe_display(raw_text):
-        """يجهّز النص للعرض العربي، ويزيل أي أحرف تحكّم خفية قد يرفضها الخط،
-        ويتراجع تلقائياً للنص الخام إن فشلت المعالجة بالكامل لأي سبب."""
         if not font_available:
             return raw_text
         try:
             shaped = get_display(arabic_reshaper.reshape(raw_text))
-            # إزالة أي أحرف تحكّم يونيكود خفية (فئة Cf) لا يملك الخط رمزاً مرئياً لها
             cleaned = ''.join(ch for ch in shaped if unicodedata.category(ch) != 'Cf')
             return cleaned
         except Exception:
-            # كحل أخير: احذف أي حرف خارج النطاق الأساسي بدل إسقاط السطر بالكامل
             return ''.join(ch for ch in raw_text if ord(ch) < 0x10000)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute("SELECT book_name, msg_id, source_chat_id FROM archive ORDER BY book_name COLLATE NOCASE")
+    cursor.execute("SELECT book_name, msg_id, source_chat_id FROM archive ORDER BY dedup_key, part_number")
     rows = cursor.fetchall()
     conn.close()
 
@@ -890,7 +879,6 @@ def generate_archive_pdf(output_path):
         try:
             c.drawRightString(width - 40, y, line)
         except Exception:
-            # سطر واحد فشل بسبب رمز غريب في اسم الملف — تخطَّه ولا توقف العملية كلها
             skipped += 1
             try:
                 c.drawRightString(width - 40, y, f"{index}. [تعذّر عرض هذا الاسم] [msg_id: {msg_id}]")
@@ -919,13 +907,18 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     if data == "admin_stats":
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        cursor.execute("SELECT COUNT(*) FROM archive")
-        total = cursor.fetchone()[0]
+        cursor.execute("SELECT COUNT(*), COUNT(DISTINCT dedup_key) FROM archive")
+        total, unique_books = cursor.fetchone()
         cursor.execute("SELECT source_chat_id, COUNT(*) FROM archive GROUP BY source_chat_id ORDER BY COUNT(*) DESC")
         by_source = cursor.fetchall()
         conn.close()
 
-        text = f"📊 *إحصائيات الأرشيف*\n\nإجمالي الكتب: `{total}`\n\n*حسب المصدر:*\n"
+        text = (
+            f"📊 *إحصائيات الأرشيف*\n\n"
+            f"إجمالي السجلات: `{total}`\n"
+            f"عدد الكتب الفريدة (بعد استبعاد التكرار): `{unique_books}`\n\n"
+            f"*حسب المصدر:*\n"
+        )
         for chat_id, count in by_source:
             label = "📚 القناة الرئيسية" if chat_id == CHANNEL_ID else (
                 "👥 الكروب الرئيسي" if chat_id == GROUP_ID else f"👥 كروب ({chat_id})"
@@ -1005,7 +998,8 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data="admin_back")]])
         await query.edit_message_text(
             "🔎 *بحث خام (تشخيصي)*\n\nأرسل أي كلمة، وسأبحث مباشرة في قاعدة البيانات "
-            "(SQL LIKE بدون أي منطق ذكي) لأريك النتائج كما هي مخزّنة فعلياً.",
+            "(SQL LIKE بدون أي منطق ذكي) لأريك النتائج كما هي مخزّنة فعلياً، مع مفتاح "
+            "عدم التكرار ورقم الجزء المحسوبين لكل سجل.",
             parse_mode="Markdown", reply_markup=keyboard
         )
 
@@ -1028,17 +1022,14 @@ THANK_YOU_MESSAGES = [
 ]
 
 
-async def send_book_results(update, context, valid_books, alternates_map=None, core_alternates_map=None):
-    """يرسل الكتب من مصدرها بنسخ (copy_message) بدل التحويل (forward_message) —
-    فلا يظهر 'محوّلة من' على الرسالة الواصلة للطالب. عند فشل الإرسال، يحاول تلقائياً
-    بنسخ بديلة قبل الاستسلام. يُرسل رسالة ودّية بعد النجاح، ويُبلغ الأدمن فوراً بأي
-    كتاب تعذّر توفيره. إن كانت النتائج أكثر من ملف واحد، يعرض زر 'إيقاف الطلب'
-    يستطيع طالب الكتاب (أو الأدمن) الضغط عليه لوقف إرسال الباقي فوراً."""
-    alternates_map = alternates_map or {}
-    core_alternates_map = core_alternates_map or {}
+async def send_book_results(update, context, valid_books):
+    """يرسل الكتب من مصدرها بنسخ (copy_message) بدل التحويل (forward_message) — فلا
+    يظهر 'محوّلة من' على الرسالة الواصلة للطالب. بما أن الأرشيف أصبح خالياً من
+    التكرار من مصدره، فكل عنصر بـ valid_books هو كتاب/جزء فريد فعلياً؛ محاولة
+    الإرسال البديلة الوحيدة المتبقية هي تجربة الكروب الرئيسي كمصدر أخير إن فشلت
+    المحاولة من المصدر الأصلي (لسجلات قديمة قد يكون مصدرها الأصلي تغيّر)."""
     succeeded, failed = [], []
 
-    # زر إيقاف الطلب: يظهر فقط عند وجود أكثر من ملف واحد للإرسال (جزء متعدد/عدة نسخ)
     request_id = None
     control_msg = None
     if len(valid_books) > 1:
@@ -1062,30 +1053,14 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
                 cancelled = True
                 break
 
-        key = normalize_arabic(book_name)
-        core_key = get_core_title(book_name)
-
         candidates = [(msg_id, source_chat_id)]
-        for alt_msg_id, alt_source in alternates_map.get(key, []):
-            if (alt_msg_id, alt_source) not in candidates:
-                candidates.append((alt_msg_id, alt_source))
-        for alt_msg_id, alt_source in core_alternates_map.get(core_key, []):
-            if (alt_msg_id, alt_source) not in candidates:
-                candidates.append((alt_msg_id, alt_source))
-
-        # طبقة أمان أخيرة: بعض الكتب (من استيراد JSON قديم قبل اعتماد الكروب كمصدر
-        # وحيد) قد تكون مخزَّنة برقم رسالة صحيح لكن مصدرها القديم (القناة) لم يعد
-        # مصدراً معتمداً. قبل الاستسلام، جرّب نفس رقم الرسالة من الكروب تحديداً (المصدر
-        # الوحيد المعتمد الآن) إن لم تتم تجربته بعد.
-        if (msg_id, GROUP_ID) not in candidates:
+        if source_chat_id != GROUP_ID:
             candidates.append((msg_id, GROUP_ID))
 
         last_error = None
         sent = False
         for attempt_msg_id, attempt_source in candidates:
             try:
-                # copy_message بدل forward_message: يرسل نسخة من الملف دون إظهار
-                # "Forwarded from" على الرسالة الواصلة للطالب.
                 await context.bot.copy_message(
                     chat_id=update.effective_chat.id,
                     from_chat_id=attempt_source,
@@ -1093,9 +1068,6 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
                 )
                 succeeded.append(book_name)
                 sent = True
-                # فاصل ثابت بين الملفات فقط، وليس بعد آخر ملف.
-                if i < len(valid_books) - 1:
-                    await asyncio.sleep(0.5)
                 break
             except Exception as e:
                 last_error = e
@@ -1104,6 +1076,8 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
         if not sent:
             failed.append((book_name, msg_id, str(last_error)))
 
+        if i < len(valid_books) - 1:
+            await asyncio.sleep(0.5)
 
     if request_id:
         context.bot_data.get('active_sends', {}).pop(request_id, None)
@@ -1116,7 +1090,6 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
             except Exception:
                 pass
 
-    # رسالة ودّية بعد نجاح إرسال كتاب واحد على الأقل
     if succeeded:
         try:
             await update.message.reply_text(random.choice(THANK_YOU_MESSAGES))
@@ -1126,8 +1099,6 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
     if failed:
         chat_type = update.effective_chat.type
         requester_user_id = update.effective_user.id
-
-        # إبلاغ فوري لكل الأدمنية بأي كتاب تعذّر توفيره، أياً كان مصدر الطلب
         requester_name = update.effective_user.full_name or str(requester_user_id)
         chat_label = "الخاص" if chat_type == 'private' else (update.effective_chat.title or str(update.effective_chat.id))
         admin_lines = [f"⚠️ تعذّر توفير {len(failed)} كتاب/كتب طُلبت من {chat_label} بواسطة {requester_name}:"]
@@ -1141,7 +1112,6 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
                 print(f"❌ تعذّر إبلاغ الأدمن {admin_id}: {e}")
 
         if not succeeded:
-            # لم ينجح أي كتاب إطلاقاً — يجب أن يعرف طالب الكتاب أن هناك خطأ فعلياً
             await update.message.reply_text(
                 "⚠️ الكتاب موجود في الأرشيف لكن تعذّر توفيره فعلياً حالياً (قد يكون حُذف من مصدره). "
                 "تم إبلاغ الأدمن فوراً وسيُعاد توفيره قريباً بإذن الله."
@@ -1151,8 +1121,6 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
 
 
 async def stop_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعالج ضغط زر 'إيقاف الطلب' — يوقف إرسال باقي الملفات لهذا الطلب تحديداً.
-    مسموح فقط لصاحب الطلب الأصلي أو لأحد الأدمنية."""
     query = update.callback_query
     data = query.data or ""
     request_id = data.split('_', 1)[1] if '_' in data else None
@@ -1172,7 +1140,6 @@ async def stop_request_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 
 async def notify_admins_not_found(context, update, query_text):
-    """يُبلغ كل الأدمنية فوراً باسم الكتاب الذي لم يُعثر عليه، ومصدر الطلب وطالبه"""
     chat_type = update.effective_chat.type
     requester_name = update.effective_user.full_name or str(update.effective_user.id)
     chat_label = "الخاص" if chat_type == 'private' else (update.effective_chat.title or str(update.effective_chat.id))
@@ -1184,7 +1151,6 @@ async def notify_admins_not_found(context, update, query_text):
             print(f"❌ تعذّر إبلاغ الأدمن {admin_id} بكتاب غير موجود: {e}")
 
 
-# جُمَل الطلب الشائعة (تُحذف من بداية الطلب، وقد تتكرر أكثر من جملة واحدة متتالية)
 FILLER_PHRASES = sorted([
     "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
     "ابغى", "ابغى كتاب", "ابغى رواية",
@@ -1198,7 +1164,6 @@ FILLER_PHRASES = sorted([
     "هل توجد", "هل توجد لديك", "هل توجد لديك رواية",
     "اريد رواية", "أريد رواية",
     "اعطني كتاب", "أعطني كتاب",
-    # صيغ "أحتاج" الدارجة — كانت غير مشمولة سابقاً فتفشل معها كل عمليات البحث
     "احتاج الى", "احتاج إلى", "أحتاج الى", "أحتاج إلى",
     "احتاج كتاب", "أحتاج كتاب", "احتاج رواية", "أحتاج رواية",
     "احتاج", "أحتاج",
@@ -1210,9 +1175,6 @@ FILLER_PHRASES = sorted([
 
 
 def strip_filler_phrases(query_text):
-    """يحذف جملة/كلمة الطلب الشائعة من بداية النص، ويكرر ذلك (وليس مرة واحدة فقط)
-    لأن الطلبات غالباً تحتوي أكثر من جملة زائدة متتالية (مثال: 'من فضلك احتاج كتاب قلبا'
-    يجب أن تُحذف منها 'من فضلك' ثم 'احتاج كتاب' معاً ليبقى 'قلبا' فقط)."""
     cleaned = query_text
     changed = True
     while changed:
@@ -1223,27 +1185,6 @@ def strip_filler_phrases(query_text):
                 changed = True
                 break
     return cleaned
-
-
-def is_author_only_query(norm_query, records):
-    """يرفض الطلب عندما يساوي اسم المؤلف الملحق بعنوان الكتاب فقط.
-    نعتمد على الأسماء المخزنة فعلياً بدلاً من التخمين من اسم شخص عام.
-    """
-    if not norm_query:
-        return False
-
-    for book_name, _, _ in records:
-        title_line = get_title_line(book_name)
-        parts = CORE_TITLE_SPLIT_PATTERN.split(title_line, maxsplit=1)
-        if len(parts) != 2:
-            continue
-
-        author_raw = strip_extension_only(parts[1].strip())
-        author_raw = TRAILING_PAREN_NUMBER_PATTERN.sub('', author_raw).strip()
-        if normalize_arabic(author_raw) == norm_query:
-            return True
-
-    return False
 
 
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1286,7 +1227,10 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         try:
             conn = sqlite3.connect(DB_PATH)
             cursor = conn.cursor()
-            cursor.execute("SELECT book_name, msg_id, source_chat_id FROM archive WHERE book_name LIKE ? LIMIT 30", (f"%{text}%",))
+            cursor.execute(
+                "SELECT book_name, msg_id, source_chat_id, dedup_key, part_number FROM archive "
+                "WHERE book_name LIKE ? LIMIT 30", (f"%{text}%",)
+            )
             raw_rows = cursor.fetchall()
             cursor.execute("SELECT COUNT(*) FROM archive WHERE book_name LIKE ?", (f"%{text}%",))
             total_matches = cursor.fetchone()[0]
@@ -1294,14 +1238,14 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
             keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
             if not raw_rows:
-                # بدون parse_mode إطلاقاً هنا: النص المُدخل من المستخدم قد يحتوي رموز Markdown خاصة
                 await update.message.reply_text(f"🔎 لا توجد أي نتيجة تحتوي ('{text}') في القاعدة.", reply_markup=keyboard)
             else:
-                # بدون Markdown نهائياً: أسماء الملفات الحقيقية شبه دائماً تحتوي على _  * [ ] وغيرها
-                # مما يكسر تنسيق Markdown ويجعل تيليجرام يرفض الرسالة بالكامل بصمت
                 lines = [f"🔎 نتائج ({text}) — الإجمالي: {total_matches}\n"]
-                for book_name, msg_id, source_chat_id in raw_rows:
-                    lines.append(f"• {book_name}\n   msg_id: {msg_id} | المصدر: {source_chat_id}")
+                for book_name, msg_id, source_chat_id, dedup_key, part_number in raw_rows:
+                    lines.append(
+                        f"• {book_name}\n   msg_id: {msg_id} | المصدر: {source_chat_id} "
+                        f"| dedup: {dedup_key} | جزء: {part_number}"
+                    )
                 msg_text = "\n".join(lines)
                 if len(msg_text) > 3900:
                     msg_text = msg_text[:3900] + "\n\n... (تم الاقتصاص)"
@@ -1361,32 +1305,23 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        records, norm_names, norm_names_no_ext, norm_core_titles, index, core_index = await asyncio.to_thread(get_search_index)
+        keys, groups, norm_names, norm_names_no_ext, core_index = await asyncio.to_thread(get_search_index)
 
         if is_author_request:
-            # وضع "كل كتب الكاتب": بحث احتوائي مقصود وواسع على الاسم الكامل (يشمل اسم المؤلف)
-            results = [records[i] for i, nn in enumerate(norm_names) if norm_query in nn]
-            if not results:
+            # وضع "كل كتب الكاتب": بحث احتوائي مقصود وواسع على الاسم التمثيلي (يشمل اسم المؤلف)
+            matched_keys = [keys[i] for i, nn in enumerate(norm_names) if norm_query in nn]
+            if not matched_keys:
                 await update.message.reply_text(f"❌ لم يتم العثور على أي كتب باسم الكاتب ('{author_query}').")
                 await notify_admins_not_found(context, update, f"كل كتب: {author_query}")
                 return
-            alternates_map = build_alternates_map(results)
-            core_alternates_map = build_core_alternates_map(results)
-            await send_book_results(update, context, reduce_to_unique_parts(results), alternates_map, core_alternates_map)
+            await send_book_results(update, context, flatten_matched_keys(matched_keys, groups))
             return
 
-        results = await asyncio.to_thread(
-            find_book_matches_indexed, norm_query, records, norm_names, norm_names_no_ext, norm_core_titles, core_index
+        matched_keys = await asyncio.to_thread(
+            find_book_matches_indexed, norm_query, keys, norm_names, norm_names_no_ext, core_index
         )
 
-        # أولوية البحث للكتاب: إذا كان الاسم عنوان كتاب فعلياً، نرسله حتى لو كان
-        # الاسم نفسه موجوداً أيضاً كاسم مؤلف في سجل آخر. لا نرفضه كـ"اسم مؤلف فقط"
-        # إلا إذا فشل البحث عن عنوان الكتاب أولاً.
-        if not results and not is_author_request and is_author_only_query(norm_query, records):
-            await update.message.reply_text("⚠️ يرجى كتابة اسم الكتاب أيضاً، لا يكفي اسم المؤلف وحده.")
-            return
-
-        if not results:
+        if not matched_keys:
             await update.message.reply_text(
                 f"❌ عذراً، الاسم ('{clean_query}') غير موجود في أرشيف القناة.\n"
                 f"تأكد من كتابة اسم الكتاب بشكل أقرب للعنوان الأصلي.\n"
@@ -1395,55 +1330,10 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await notify_admins_not_found(context, update, clean_query)
             return
 
-        # استكمال بقية أجزاء السلسلة تلقائياً: حتى لو طابق البحث الأساسي جزءاً واحداً فقط
-        # (بسبب اختلاف بسيط في صيغة تسمية باقي الأجزاء)، نجلب أي كتاب آخر يشارك نفس
-        # 'الاسم الأساسي' بعد حذف رقم/اسم الجزء. نتجاهل المسافات في هذه المقارنة تحديداً
-        # (لا في المطابقة العادية) لأن فروقاً بسيطة مثل 'وحرز' مقابل 'و حرز' شائعة جداً
-        # بين رفعات مختلفة لنفس الكتاب ولا يجب أن تمنع ربط أجزائه ببعضها.
-        def loose_series_key(name):
-            return normalize_arabic(strip_part_pattern(name)).replace(' ', '')
-
-        found_base_keys = {loose_series_key(r[0]) for r in results}
-        # طبقة إضافية: نفس "العنوان الجوهري" (بدون اسم المؤلف)، تلتقط أجزاءً قد تختلف
-        # تسميتها عن اسم الجزء الأول بشكل أكبر (مثلاً وصف/مؤلف مختلف مرفق مع كل جزء)
-        found_core_keys = {get_core_title(r[0]).replace(' ', '') for r in results}
-
-        def _keys_similar(a, b, threshold=0.9):
-            if not a or not b:
-                return False
-            return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
-
-        if found_base_keys or found_core_keys:
-            existing_ids = {(r[1], r[2]) for r in results}
-            for idx, (rec_name, rec_msg, rec_source) in enumerate(records):
-                if (rec_msg, rec_source) in existing_ids:
-                    continue
-                rec_loose = loose_series_key(rec_name)
-                rec_core = get_core_title(rec_name).replace(' ', '')
-                is_match = rec_loose in found_base_keys or rec_core in found_core_keys
-                if not is_match and extract_part_number(rec_name) is not None:
-                    # طبقة أخيرة أكثر تساهلاً: تُستخدم فقط للسجلات التي تحمل رقم جزء
-                    # صريح في اسمها (لذلك شبه مؤكد أنها جزء من كتاب متسلسل)، وتسمح
-                    # بتشابه قوي (90%+) بدل تطابق تام — يلتقط فروقاً بسيطة في كتابة
-                    # اسم الجزء التالي لم تُغطِّها المقارنة الدقيقة أعلاه.
-                    is_match = (
-                        any(_keys_similar(rec_loose, k) for k in found_base_keys)
-                        or any(_keys_similar(rec_core, k) for k in found_core_keys)
-                    )
-                if is_match:
-                    results.append((rec_name, rec_msg, rec_source))
-                    existing_ids.add((rec_msg, rec_source))
-
-        # خريطتا النسخ البديلة (قبل حذف التكرار) — تُستخدمان لإعادة المحاولة تلقائياً
-        # إن فشل إرسال نسخة معيّنة (مثلاً: رسالتها محذوفة من القناة):
-        # 1) بدائل بنفس الاسم تماماً أولاً
-        # 2) ثم كطبقة أخيرة: بدائل بنفس 'العنوان الجوهري' حتى لو اختلف اسم المؤلف/الوصف المرفق
-        alternates_map = build_alternates_map(results)
-        core_alternates_map = build_core_alternates_map(results)
-
-        final_books = reduce_to_unique_parts(results)
-
-        await send_book_results(update, context, final_books, alternates_map, core_alternates_map)
+        # كل أجزاء الكتاب (إن وُجدت) مُجمَّعة سلفاً تحت نفس dedup_key ومرتبة حسب
+        # part_number المخزَّن — لا حاجة لأي بحث إضافي عن "بقية الأجزاء" هنا.
+        final_books = flatten_matched_keys(matched_keys, groups)
+        await send_book_results(update, context, final_books)
 
     except Exception as e:
         print(f"❌ خطأ في search_and_forward: {e}")
@@ -1457,7 +1347,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: 2026-08-20-v14-strict-dedupe-series-order-delay")
+    print("🔖 BOT_CODE_VERSION: 2026-08-21-v13-dedup-at-source")
     print("=" * 60)
 
     init_db()
