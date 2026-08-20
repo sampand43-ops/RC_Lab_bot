@@ -148,6 +148,9 @@ PART_PATTERN = re.compile(
     r'(الجزء|المجلد|جـ?|مجلد|part|vol)\s*([0-9٠-٩]+|الأول|الثاني|الثالث|الرابع|الخامس|السادس|السابع|الثامن|التاسع|العاشر)',
     re.IGNORECASE
 )
+
+# نمط لاستثناء الأرقام التي بين قوسين في نهاية الاسم (مثل (1) أو (٢)) باعتبارها نسخة مكررة وليست جزءاً
+BRACKETED_DUPLICATE_PATTERN = re.compile(r'\(\s*[0-9٠-٩]+\s*\)\s*(?:\.pdf|\.epub|\.zip)?$')
 TRAILING_NUM_PATTERN = re.compile(r'[\s\-_]([0-9٠-٩])\s*(?:\.pdf|\.epub|\.zip)?$')
 
 
@@ -162,6 +165,11 @@ def extract_part_number(filename):
     if not filename:
         return None
     filename = get_title_line(filename)
+    
+    # إذا كان الرقم بين قوسين في النهاية، فهذا يعني نسخة مكررة وليس جزءاً
+    if BRACKETED_DUPLICATE_PATTERN.search(filename):
+        return None
+
     match = PART_PATTERN.search(filename)
     if match:
         val = match.group(2)
@@ -170,6 +178,7 @@ def extract_part_number(filename):
         val_en = val.translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
         if val_en.isdigit():
             return int(val_en)
+            
     num_match = TRAILING_NUM_PATTERN.search(filename)
     if num_match:
         val = num_match.group(1).translate(str.maketrans('٠١٢٣٤٥٦٧٨٩', '0123456789'))
@@ -182,7 +191,8 @@ def strip_part_pattern(filename):
     if not filename:
         return ""
     filename = get_title_line(filename)
-    stripped = PART_PATTERN.sub('', filename)
+    stripped = BRACKETED_DUPLICATE_PATTERN.sub('', filename)
+    stripped = PART_PATTERN.sub('', stripped)
     stripped = TRAILING_NUM_PATTERN.sub('', stripped)
     stripped = re.sub(r'\.(pdf|epub|zip|mobi|docx?)$', '', stripped, flags=re.IGNORECASE)
     return stripped.strip()
@@ -249,14 +259,14 @@ def build_alternates_map(records):
     return alternates
 
 
-CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s+[-–—]\s*|\s*[-–—]\s+')
+AUTHOR_SPLIT_PATTERN = re.compile(r'\s+[-–—]\s*|\s*[-–—]\s+')
 
 
 def get_core_title(raw_book_name):
     if not raw_book_name:
         return ""
     raw_book_name = get_title_line(raw_book_name)
-    core_raw = CORE_TITLE_SPLIT_PATTERN.split(raw_book_name, maxsplit=1)[0].strip()
+    core_raw = AUTHOR_SPLIT_PATTERN.split(raw_book_name, maxsplit=1)[0].strip()
     core_raw = strip_extension_only(core_raw)
     return normalize_arabic(core_raw)
 
@@ -269,39 +279,49 @@ def build_core_alternates_map(records):
     return alternates
 
 
-def group_into_series(records):
-    groups = defaultdict(list)
-    for book_name, msg_id, source_chat_id in records:
-        base_key = normalize_arabic(strip_part_pattern(book_name))
-        groups[base_key].append((book_name, msg_id, source_chat_id))
-    return groups
-
-
-def reduce_to_unique_parts(records):
+def reduce_to_unique_parts(records, query_norm=""):
     deduped = dedupe_exact(records)
-    groups = group_into_series(deduped)
+    
+    # تجميع حسب العنوان الأساسي (قبل الشرطة التي تفصل اسم المؤلف عادة)
+    groups = defaultdict(list)
+    for item in deduped:
+        book_name = item[0]
+        base_key = get_core_title(book_name)
+        groups[base_key].append(item)
 
     final_books = []
     for base_key, items in groups.items():
-        if len(items) >= 2:
-            sorted_items = sorted(items, key=lambda x: extract_part_number(x[0]) or 0)
-            seen_parts = set()
-            seen_unlabeled = False
-            unique_parts = []
-            for item in sorted_items:
-                part_num = extract_part_number(item[0])
-                if part_num is not None:
-                    if part_num in seen_parts:
-                        continue
-                    seen_parts.add(part_num)
+        if len(items) >= 1:
+            # فصل الكتب التي تحتوي على أجزاء حقيقية عن النسخ المكررة أو النسخ بمؤلفين
+            has_parts = any(extract_part_number(item[0]) is not None for item in items)
+            if has_parts:
+                sorted_items = sorted(items, key=lambda x: extract_part_number(x[0]) or 0)
+                seen_parts = set()
+                seen_unlabeled = False
+                unique_parts = []
+                for item in sorted_items:
+                    part_num = extract_part_number(item[0])
+                    if part_num is not None:
+                        if part_num in seen_parts:
+                            continue
+                        seen_parts.add(part_num)
+                    else:
+                        if seen_unlabeled:
+                            continue
+                        seen_unlabeled = True
+                    unique_parts.append(item)
+                final_books.extend(unique_parts)
+            else:
+                # تصفية النسخ المتشابهة (بين نسخة بسيطة ونسخة تحمل اسم المؤلف)
+                # إذا طابق البحث نصاً بح بحذافيره بدون اسم مؤلف، نفضل النسخة الصافية، وإذا طلب مع مؤلف نفضل نسخة المؤلف
+                exact_match_items = [it for it in items if normalize_arabic(get_core_title(it[0])) == query_norm]
+                if exact_match_items and len(items) > 1:
+                    # تفضيل النسخة الأقصر اسماً (التي لا تحتوي على تفاصيل زائدة للمؤلف إن وجد طلب مطابق)
+                    best_item = min(exact_match_items, key=lambda x: len(x[0]))
                 else:
-                    if seen_unlabeled:
-                        continue
-                    seen_unlabeled = True
-                unique_parts.append(item)
-            final_books.extend(unique_parts)
-        else:
-            final_books.append(items[0])
+                    # اختيار النسخة الأنظف أو الأقصر اسماً من المجموعة لتجنب التكرار
+                    best_item = min(items, key=lambda x: len(x[0]))
+                final_books.append(best_item)
     return final_books
 
 
@@ -365,6 +385,7 @@ def get_search_index():
 def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext, norm_core_titles, core_index):
     query_words = get_words(norm_query)
 
+    # مطابقة تامة 100% للعنوان أو العنوان الأساسي
     exact = [
         records[i] for i, nn in enumerate(norm_names_no_ext)
         if nn == norm_query or norm_core_titles[i] == norm_query
@@ -543,7 +564,6 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
         source_chat_id = forced_source_chat_id or auto_detected_source_id or GROUP_ID
 
         messages = data.get("messages", [])
-        total_msgs = len(messages)
 
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -840,8 +860,6 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
         if not sent:
             failed.append((book_name, msg_id, str(last_error)))
 
-        # ⚡ تم إزالة التأخير (asyncio.sleep) نهائياً ليتم الإرسال فوراً بدون تأخير
-
     if request_id:
         context.bot_data.get('active_sends', {}).pop(request_id, None)
         if control_msg:
@@ -989,7 +1007,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             if not results:
                 await update.message.reply_text(f"❌ لم يتم العثور على كتب للكاتب ('{author_query}').")
                 return
-            await send_book_results(update, context, reduce_to_unique_parts(results), build_alternates_map(results), build_core_alternates_map(results))
+            await send_book_results(update, context, reduce_to_unique_parts(results, norm_query), build_alternates_map(results), build_core_alternates_map(results))
             return
 
         results = await asyncio.to_thread(
@@ -1000,7 +1018,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(f"❌ عذراً، الكتاب ('{clean_query}') غير موجود في الأرشيف.")
             return
 
-        final_books = reduce_to_unique_parts(results)
+        final_books = reduce_to_unique_parts(results, norm_query)
         await send_book_results(update, context, final_books, build_alternates_map(results), build_core_alternates_map(results))
 
     except Exception as e:
@@ -1011,7 +1029,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: Updated - No Delay & Fixed Deduplication")
+    print("🔖 BOT_CODE_VERSION: Strict Exact Match & Bracketed Duplicate Filtering")
     print("=" * 60)
 
     init_db()
@@ -1046,4 +1064,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
