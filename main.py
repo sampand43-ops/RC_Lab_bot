@@ -1323,8 +1323,8 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         if not matched_keys:
             await update.message.reply_text(
-                f"❌ عذراً، الاسم ('{clean_query}') غير موجود في أرشيف القناة.\n"
-                f"تأكد من كتابة اسم الكتاب بشكل أقرب للعنوان الأصلي.\n"
+                f"❌ عذراً، الاسم ('{clean_query}') غير موجود في أرشيف مجتمع القراءة.\n"
+                f"تأكد من كتابة اسم الكتاب بشكل صحيح.\n"
                 f"تم إبلاغ الأدمن بطلبك ليتم توفيره قريباً بإذن الله."
             )
             await notify_admins_not_found(context, update, clean_query)
