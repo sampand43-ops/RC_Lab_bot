@@ -26,7 +26,8 @@ DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 
-CHANNEL_ID = -1004395670008
+# الكروب الرئيسي — مصدر ثانٍ ثابت للكتب بجانب القناة، دائماً معتمد بغض النظر عن حالة قاعدة البيانات
+GROUP_ID = -1002066990968
 ADMIN_IDS = [7898871921, 1937491557]
 BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
