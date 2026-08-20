@@ -4,8 +4,6 @@ import sqlite3
 import re
 import asyncio
 import difflib
-import random
-import uuid
 import urllib.request
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -29,9 +27,6 @@ DB_PATH = os.path.join(DATA_DIR, "archive_bot.db")
 TOKEN = "8619586974:AAGuSahN1tsDZLNOtmSOmdjwjw8ZcC2IMe8"
 
 CHANNEL_ID = -1004395670008
-
-# الكروب الرئيسي — مصدر ثانٍ ثابت للكتب بجانب القناة، دائماً معتمد بغض النظر عن حالة قاعدة البيانات
-GROUP_ID = -1002066990968
 ADMIN_IDS = [7898871921, 1937491557]
 BOT_USERNAME = "RCGivvvv_bot"
 GROUP_NAME = "مجتمع القراءة Reading Community"
@@ -161,24 +156,9 @@ PART_PATTERN = re.compile(
 TRAILING_NUM_PATTERN = re.compile(r'[\s\-_]([0-9٠-٩])\s*(?:\.pdf|\.epub|\.zip)?$')
 
 
-def get_title_line(raw_book_name):
-    """يأخذ السطر الأول فقط من اسم الكتاب المخزَّن.
-    هذا مهم لأن بعض الكتب أُرشفت من رسائل نصية طويلة (كابشن فيه العنوان بالسطر الأول
-    ثم وصف/تفاصيل إضافية بالأسطر التالية) بدل اسم ملف حقيقي بسطر واحد. سابقاً كان
-    اسم الكتاب المخزَّن = النص الكامل بكل أسطره، فكان أي بحث بعنوان دقيق (مثل
-    'الصداقة' أو 'البنت والاسد') يفشل لأن العنوان الكامل المخزَّن لم يكن يساوي أو
-    حتى يحتوي كلمات مطابقة تماماً بسبب الوصف الإضافي الملتصق به. بأخذ السطر الأول
-    فقط عند حساب مفاتيح المطابقة (وليس عند العرض)، يعود العنوان الفعلي مطابقاً."""
-    if not raw_book_name:
-        return raw_book_name
-    first = raw_book_name.split('\n', 1)[0].strip()
-    return first if first else raw_book_name
-
-
 def extract_part_number(filename):
     if not filename:
         return None
-    filename = get_title_line(filename)
     match = PART_PATTERN.search(filename)
     if match:
         val = match.group(2)
@@ -198,7 +178,6 @@ def extract_part_number(filename):
 def strip_part_pattern(filename):
     if not filename:
         return ""
-    filename = get_title_line(filename)
     stripped = PART_PATTERN.sub('', filename)
     stripped = TRAILING_NUM_PATTERN.sub('', stripped)
     stripped = re.sub(r'\.(pdf|epub|zip|mobi|docx?)$', '', stripped, flags=re.IGNORECASE)
@@ -245,8 +224,8 @@ def strip_extension_only(filename):
 
 
 AUTHOR_REQUEST_PATTERNS = [
-    re.compile(r'^(?:اريد|أريد|ابغى|عايز|عاوز|عايزة|عاوزة)\s+(?:كل|جميع)\s+(?:كتب|روايات|مؤلفات|اعمال|أعمال|قصص)\s+(.+)$'),
-    re.compile(r'^(?:كل|جميع)\s+(?:كتب|روايات|مؤلفات|اعمال|أعمال|قصص)\s+(.+)$'),
+    re.compile(r'^(?:اريد|أريد)\s+(?:كل|جميع)\s+كتب\s+(.+)$'),
+    re.compile(r'^(?:كل|جميع)\s+كتب\s+(.+)$'),
 ]
 FORBIDDEN_PREFIXES = ["صور من", "قصص من", "مختصر", "شرح"]
 
@@ -263,47 +242,6 @@ def dedupe_exact(records):
     return deduped
 
 
-def build_alternates_map(records):
-    """يبني خريطة (اسم مُطبَّع -> كل النسخ الممكنة له) من نتائج غير مُنقّاة من التكرار،
-    تُستخدم لإعادة المحاولة تلقائياً بنسخة بديلة إن فشلت النسخة الأساسية عند الإرسال
-    (مثلاً: رسالة محذوفة من القناة، بينما نسخة أخرى بنفس الاسم لا تزال موجودة)."""
-    alternates = defaultdict(list)
-    for book_name, msg_id, source_chat_id in records:
-        key = normalize_arabic(book_name)
-        alternates[key].append((msg_id, source_chat_id))
-    return alternates
-
-
-CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s+[-–—]\s*|\s*[-–—]\s+')
-
-
-def get_core_title(raw_book_name):
-    """يستخرج 'العنوان الجوهري' بأخذ السطر الأول فقط، ثم حذف كل ما بعد أول شرطة
-    (يليها مسافة)، ثم حذف الامتداد، ثم تطبيع الناتج. يجب استدعاؤها على الاسم الخام
-    (قبل normalize_arabic)، لأن التطبيع يحذف الشرطة نفسها فتفقد إمكانية العثور عليها.
-    مثال: 'احببت وغدا - عماد رشاد.pdf' -> 'احببت وغدا'.
-    يُستخدم فقط كطبقة احتياطية أخيرة لإعادة المحاولة عند الفشل — وليس للمطابقة
-    الأساسية — حتى لا يختلط كتابان مختلفان فعلياً بنفس العنوان الأساسي (مثل
-    'فن الحرب' و'فن الحرب - نيكولاس ميكيافيلي' اللذين يُعاملان كنسختين مختلفتين
-    عمداً عند الاختيار الأول، لكن كبدائل إعادة محاولة أخيرة هذا مقبول)."""
-    if not raw_book_name:
-        return ""
-    raw_book_name = get_title_line(raw_book_name)
-    core_raw = CORE_TITLE_SPLIT_PATTERN.split(raw_book_name, maxsplit=1)[0].strip()
-    core_raw = strip_extension_only(core_raw)
-    return normalize_arabic(core_raw)
-
-
-def build_core_alternates_map(records):
-    """خريطة بدائل أوسع مبنية على العنوان الجوهري (بدون اسم المؤلف/الوصف الإضافي)،
-    تُستخدم كطبقة أخيرة لإعادة المحاولة بعد استنفاد البدائل الدقيقة (نفس الاسم تماماً)."""
-    alternates = defaultdict(list)
-    for book_name, msg_id, source_chat_id in records:
-        core = get_core_title(book_name)
-        alternates[core].append((msg_id, source_chat_id))
-    return alternates
-
-
 def group_into_series(records):
     groups = defaultdict(list)
     for book_name, msg_id, source_chat_id in records:
@@ -312,61 +250,18 @@ def group_into_series(records):
     return groups
 
 
-def reduce_to_unique_parts(records):
-    """يحذف النسخ المكررة، ويُبقي نسخة واحدة فقط لكل كتاب لا يحتوي أجزاءً، بينما
-    يُبقي كل الأجزاء المميزة (مرتبة تصاعدياً) للكتب متعددة الأجزاء الفعلية.
-    يُستخدم في كل مسارات الإرسال (بحث عادي + طلب كل كتب مؤلف) لتوحيد السلوك."""
-    deduped = dedupe_exact(records)
-    groups = group_into_series(deduped)
-
-    final_books = []
-    for base_key, items in groups.items():
-        if len(items) >= 2:
-            sorted_items = sorted(items, key=lambda x: extract_part_number(x[0]) or 0)
-            seen_parts = set()
-            seen_unlabeled = False
-            unique_parts = []
-            for item in sorted_items:
-                part_num = extract_part_number(item[0])
-                if part_num is not None:
-                    if part_num in seen_parts:
-                        continue
-                    seen_parts.add(part_num)
-                else:
-                    if seen_unlabeled:
-                        continue
-                    seen_unlabeled = True
-                unique_parts.append(item)
-            final_books.extend(unique_parts)
-        else:
-            final_books.append(items[0])
-    return final_books
-
-
 # ==================== فهرس البحث المُخزَّن مؤقتاً ====================
 
-_search_index_cache = {
-    "fingerprint": None, "records": [], "norm_names": [], "norm_names_no_ext": [],
-    "norm_core_titles": [], "index": {}, "core_index": {}
-}
+_search_index_cache = {"fingerprint": None, "records": [], "norm_names": [], "norm_names_no_ext": [], "index": {}}
 
 
 def get_search_index():
-    """يُرجع (records, norm_names, norm_names_no_ext, norm_core_titles, index, core_index).
-    - norm_names: السطر الأول من الاسم بعد التطبيع (بما فيه الامتداد إن وُجد ضمنه)، لمرحلة
-      'يبدأ بـ' (تشمل اسم المؤلف إن وُجد، فيعمل طلب 'العنوان + اسم المؤلف معاً' بشكل صحيح).
-    - norm_names_no_ext: السطر الأول بعد حذف الامتداد فقط، لمرحلة التطابق التام الأساسية.
-    - norm_core_titles: العنوان الجوهري فقط (بعد حذف '- اسم المؤلف' والامتداد، من السطر
-      الأول حصراً)، يُستخدم في مرحلة تطابق تام إضافية تسمح بطلب العنوان وحده حتى لو كان
-      مخزَّناً مع اسم المؤلف (يعمل حتى مع كلمة واحدة، بأمان، لأنه تطابق تام حصراً وليس احتواءً).
-    - index: فهرس الكلمات من الاسم الكامل (السطر الأول)، لمرحلة 'يبدأ بـ' فقط عبر norm_names
-      (غير مُستخدم مباشرة، محفوظ للتوافق).
-    - core_index: فهرس الكلمات من العنوان الجوهري فقط (بدون اسم المؤلف) — يمنع طلب اسم المؤلف
-      وحده (بدون عنوان) من مطابقة كل كتبه عبر مرحلتي 'كل الكلمات' و'التقريبي'.
-
-    ملاحظة مهمة: العمل على 'السطر الأول' فقط (عبر get_title_line) بدل النص الكامل المخزَّن
-    يحل مشكلة كتب أُرشفت من رسائل نصية طويلة (كابشن بعدة أسطر: عنوان ثم وصف) والتي كانت
-    تفشل في المطابقة التامة رغم وجودها فعلياً في الأرشيف."""
+    """يُرجع (records, norm_names, norm_names_no_ext, index)، ويعيد البناء تلقائياً فقط عند تغيّر الأرشيف.
+    - norm_names: الاسم الكامل بعد التطبيع (بما فيه الامتداد كـ'pdf')، يُستخدم في مراحل
+      'يبدأ بـ' و'كل الكلمات' و'التقريبي' — ثبت أنها آمنة وموثوقة (كالكود الأصلي المضمون).
+    - norm_names_no_ext: نفس الاسم لكن بعد حذف الامتداد فقط (.pdf) دون لمس أي رقم،
+      يُستخدم حصراً في مرحلة 'التطابق التام' — لأن ترك الامتداد كان يمنع أي تطابق تام
+      من الأصل ويدفع كل طلب لمرحلة أوسع تُرسل كل الإصدارات المشابهة معاً بدل الدقيق منها."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM archive")
@@ -374,8 +269,10 @@ def get_search_index():
 
     if _search_index_cache["fingerprint"] == fingerprint:
         conn.close()
-        c = _search_index_cache
-        return (c["records"], c["norm_names"], c["norm_names_no_ext"], c["norm_core_titles"], c["index"], c["core_index"])
+        return (
+            _search_index_cache["records"], _search_index_cache["norm_names"],
+            _search_index_cache["norm_names_no_ext"], _search_index_cache["index"]
+        )
 
     cursor.execute("SELECT book_name, msg_id, source_chat_id FROM archive GROUP BY msg_id, source_chat_id")
     raw_records = cursor.fetchall()
@@ -383,59 +280,41 @@ def get_search_index():
 
     norm_forbidden = [normalize_arabic(p) for p in FORBIDDEN_PREFIXES]
 
-    records, norm_names, norm_names_no_ext, norm_core_titles = [], [], [], []
+    records, norm_names, norm_names_no_ext = [], [], []
     index = defaultdict(set)
-    core_index = defaultdict(set)
 
     for book_name, msg_id, source_chat_id in raw_records:
-        norm_name_full = normalize_arabic(book_name)
-        if any(norm_name_full.startswith(p) for p in norm_forbidden):
+        norm_name = normalize_arabic(book_name)
+        if any(norm_name.startswith(p) for p in norm_forbidden):
             continue
-
-        title_line = get_title_line(book_name)
-        norm_name = normalize_arabic(title_line)
 
         i = len(records)
         records.append((book_name, msg_id, source_chat_id))
         norm_names.append(norm_name)
-        norm_names_no_ext.append(normalize_arabic(strip_extension_only(title_line)))
-        core_title = get_core_title(book_name)
-        norm_core_titles.append(core_title)
-
+        norm_names_no_ext.append(normalize_arabic(strip_extension_only(book_name)))
         for w in get_words(norm_name):
             index[w].add(i)
-        for w in get_words(core_title):
-            core_index[w].add(i)
 
     _search_index_cache.update(
         fingerprint=fingerprint, records=records, norm_names=norm_names,
-        norm_names_no_ext=norm_names_no_ext, norm_core_titles=norm_core_titles,
-        index=index, core_index=core_index
+        norm_names_no_ext=norm_names_no_ext, index=index
     )
-    return records, norm_names, norm_names_no_ext, norm_core_titles, index, core_index
+    return records, norm_names, norm_names_no_ext, index
 
 
-def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext, norm_core_titles, core_index):
+def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext, index):
     """
     بحث دقيق بأولويات صارمة:
-    1) تطابق تام للاسم الكامل (بعد حذف الامتداد فقط)
-       أو تطابق تام للعنوان الجوهري (بعد حذف '- اسم المؤلف' أيضاً) — يعمل حتى بكلمة واحدة،
-       لأنه تطابق تام حصراً، فيسمح بطلب العنوان وحده حتى لو خُزِّن مع اسم المؤلف
-       (مثال: 'الصداقة' تُطابق 'الصداقة - فلان.pdf').
-    2) (كلمتان فأكثر) الاسم الكامل (بامتداده، ويشمل اسم المؤلف إن وُجد) يبدأ بنص الطلب بالكامل
-       — يسمح بطلب 'العنوان + اسم المؤلف معاً'.
-    3) (كلمتان فأكثر) كل كلمات الطلب موجودة في العنوان الجوهري فقط (بدون اسم المؤلف) —
-       يمنع طلب اسم المؤلف وحده (بدون عنوان) من مطابقة كل كتبه بالخطأ.
-    4) (كلمتان فأكثر، وكل كلمة 3 أحرف فأكثر) تطابق تقريبي صارم على العنوان الجوهري فقط.
+    1) تطابق تام كامل للاسم (بعد حذف الامتداد فقط .pdf — وليس رقم الجزء)
+    2) (كلمتان فأكثر) الاسم الكامل (بامتداده) يبدأ بنص الطلب بالكامل
+    3) (كلمتان فأكثر) كل كلمات الطلب موجودة كاملة (عبر الفهرس)
+    4) (كلمتان فأكثر، وكل كلمة 3 أحرف فأكثر) تطابق تقريبي صارم (85%+)
     """
     query_words = get_words(norm_query)
 
-    exact = [
-        records[i] for i, nn in enumerate(norm_names_no_ext)
-        if nn == norm_query or norm_core_titles[i] == norm_query
-    ]
+    exact = [records[i] for i, nn in enumerate(norm_names_no_ext) if nn == norm_query]
     if exact:
-        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE1(exact/core) -> {[r[0] for r in exact]}")
+        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE1(exact) -> {[r[0] for r in exact]}")
         return exact
 
     if len(query_words) < 2:
@@ -447,43 +326,33 @@ def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext
         print(f"🔎 SEARCH[{norm_query!r}] -> STAGE2(startswith) -> {[r[0] for r in startswith_matches]}")
         return startswith_matches
 
-    word_sets = [core_index.get(qw) for qw in query_words]
+    word_sets = [index.get(qw) for qw in query_words]
     if all(word_sets):
         common = set.intersection(*word_sets)
         if common:
             result = [records[i] for i in common]
-            print(f"🔎 SEARCH[{norm_query!r}] -> STAGE3(all words in core title) -> {[r[0] for r in result]}")
+            print(f"🔎 SEARCH[{norm_query!r}] -> STAGE3(all words) -> {[r[0] for r in result]}")
             return result
 
     if any(len(qw) < 3 for qw in query_words):
-        print(f"🔎 SEARCH[{norm_query!r}] -> كلمة قصيرة موجودة، تشابه أكثر صرامة (100%)")
-        cutoff = 1
-    else:
-        cutoff = 1
+        print(f"🔎 SEARCH[{norm_query!r}] -> تجاهل التقريبي (كلمة قصيرة) -> فارغ")
+        return []
 
-    vocabulary = list(core_index.keys())
+    vocabulary = list(index.keys())
     per_word_candidates = []
     for qw in query_words:
-        # الكلمات القصيرة جداً (أقل من 3 أحرف) لا تخضع للتقريب إطلاقاً — يجب أن تُطابق بحروفها بالضبط
-        # (منع مشاكل مثل مطابقة "فن" مع كلمات أخرى قصيرة غير مرتبطة إطلاقاً)
-        if len(qw) < 3:
-            if qw not in core_index:
-                print(f"🔎 SEARCH[{norm_query!r}] -> كلمة قصيرة '{qw}' غير موجودة حرفياً -> فارغ")
-                return []
-            word_candidates = set(core_index[qw])
-        else:
-            close_words = difflib.get_close_matches(qw, vocabulary, n=5, cutoff=cutoff)
-            if not close_words:
-                print(f"🔎 SEARCH[{norm_query!r}] -> لا تشابه لكلمة '{qw}' -> فارغ")
-                return []
-            word_candidates = set()
-            for w in close_words:
-                word_candidates |= core_index.get(w, set())
+        close_words = difflib.get_close_matches(qw, vocabulary, n=5, cutoff=0.85)
+        if not close_words:
+            print(f"🔎 SEARCH[{norm_query!r}] -> لا تشابه لكلمة '{qw}' -> فارغ")
+            return []
+        word_candidates = set()
+        for w in close_words:
+            word_candidates |= index.get(w, set())
         per_word_candidates.append(word_candidates)
 
     common = set.intersection(*per_word_candidates) if per_word_candidates else set()
     result = [records[i] for i in common]
-    print(f"🔎 SEARCH[{norm_query!r}] -> STAGE4(تقريبي على العنوان الجوهري) -> {[r[0] for r in result]}")
+    print(f"🔎 SEARCH[{norm_query!r}] -> STAGE4(تقريبي) -> {[r[0] for r in result]}")
     return result
 
 
@@ -492,7 +361,7 @@ def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext
 async def is_allowed_group(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
     chat = update.effective_chat
     if chat and chat.type in ['group', 'supergroup']:
-        if chat.id == GROUP_ID or is_group_approved(chat.id):
+        if is_group_approved(chat.id):
             return True
         try:
             await context.bot.send_message(chat.id, LEAVE_TEXT, parse_mode="Markdown", disable_web_page_preview=True)
@@ -557,10 +426,7 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat is None:
         return
-    # المصدر الوحيد المعتمد للأرشفة التلقائية الآن هو الكروب الرئيسي (وأي كروب آخر
-    # يُضاف ويُعتمد يدوياً عبر allowed_groups). القناة لم تعد مصدراً — أي ملف يُرفع
-    # إليها لا يُؤرشف تلقائياً بعد الآن.
-    if chat.id != GROUP_ID and not is_group_approved(chat.id):
+    if chat.id != CHANNEL_ID and not is_group_approved(chat.id):
         return
 
     document = message.document or message.video or message.audio
@@ -577,11 +443,8 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
             (book_name, message.message_id, chat.id)
         )
         conn.commit()
-        print(f"✅ أُرشف تلقائياً: '{book_name}' (msg_id={message.message_id}, chat={chat.id})")
     except sqlite3.IntegrityError:
-        print(f"ℹ️ الكتاب '{book_name}' مؤرشف مسبقاً بنفس رقم الرسالة، تم التجاهل.")
-    except Exception as e:
-        print(f"❌ فشلت أرشفة '{book_name}' تلقائياً: {e}")
+        pass
     finally:
         conn.close()
 
@@ -596,85 +459,23 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not document or not document.file_name.endswith('.json'):
         return
 
-    # حدّ تحميل الملفات عبر Bot API هو 20 ميجابايت بالضبط — وهذا قيد ثابت من تيليجرام
-    # نفسه (خاص بالبوتات فقط، ولا علاقة له بحد الـ 2/4 جيجابايت المسموح للمستخدمين
-    # العاديين)، ولا يمكن تجاوزه إلا بتشغيل "Local Bot API Server" خاص (بنية تحتية
-    # منفصلة تماماً، غير متاحة على Railway بالإعداد الحالي). لذلك نتحقق من الحجم
-    # *قبل* محاولة التحميل أصلاً بدل ترك الخطأ يظهر بشكل مبهم لاحقاً.
-    BOT_API_MAX_DOWNLOAD = 20 * 1024 * 1024
-    if document.file_size and document.file_size > BOT_API_MAX_DOWNLOAD:
-        size_mb = document.file_size / (1024 * 1024)
-        await update.message.reply_text(
-            f"⚠️ الملف حجمه {size_mb:.1f} ميجابايت، وهذا أكبر من الحد الذي يسمح تيليجرام "
-            f"للبوتات (وليس المستخدمين) بتحميله عبر الـ Bot API، وهو *20 ميجابايت فقط* — "
-            f"هذا قيد من تيليجرام نفسه ولا علاقة له بإعدادات البوت أو Railway.\n\n"
-            f"📌 *الحل:* أعد تصدير سجل القناة من Telegram Desktop، وفي نافذة التصدير فعّل "
-            f"خيار *\"Size limit for one file\"* واجعله مثلاً 15 ميجابايت. سيقوم تيليجرام "
-            f"تلقائياً بتقسيم الأرشفة إلى عدة ملفات (result.json, result2.json, ...)، "
-            f"وكل ملف سيكون أصغر من الحد المسموح.\n\n"
-            f"أرسل لي بعدها كل ملف على حدة (واحداً تلو الآخر) وسأؤرشف كل جزء تلقائياً.",
-            parse_mode="Markdown"
-        )
-        return
-
-    # الكابشن (إن وُجد) يبقى تجاوزاً يدوياً اختيارياً لمن يريد فرض مصدر معيّن،
-    # لكنه لم يعد الاعتماد الأساسي — لأن نسيان كتابته كان يتسبب بأرشفة كل كتب
-    # الكروب (رسائل بأرقام ضخمة تصل لمئات الآلاف) على أنها من القناة افتراضياً،
-    # فيفشل تحويلها لاحقاً بخطأ "Message to forward not found" لأن رقم الرسالة
-    # غير موجود أصلاً في القناة.
     caption = update.message.caption
-    forced_source_chat_id = None
-    if caption:
-        try:
-            forced_source_chat_id = int(caption.strip())
-        except ValueError:
-            forced_source_chat_id = None
+    try:
+        source_chat_id = int(caption.strip()) if caption else CHANNEL_ID
+    except ValueError:
+        source_chat_id = CHANNEL_ID
 
-    status_msg = await update.message.reply_text("🚀 جاري تحليل ملف التصدير...")
+    status_msg = await update.message.reply_text(
+        f"🚀 جاري تحليل ملف التصدير (المصدر: `{source_chat_id}`)...", parse_mode="Markdown"
+    )
 
     try:
-        try:
-            file = await context.bot.get_file(document.file_id)
-        except Exception as e:
-            if "too big" in str(e).lower() or "file is too big" in str(e).lower():
-                await status_msg.edit_text(
-                    "⚠️ الملف أكبر من 20 ميجابايت (الحد الأقصى الذي تسمح به تيليجرام لتحميل "
-                    "الملفات عبر البوتات تحديداً). أعد تصدير الأرشيف مقسّماً لملفات أصغر "
-                    "(خيار \"Size limit for one file\" أثناء التصدير من Telegram Desktop) "
-                    "وأرسلها لي واحداً تلو الآخر."
-                )
-                return
-            raise
+        file = await context.bot.get_file(document.file_id)
         json_path = os.path.join(DATA_DIR, f"temp_export_{update.message.message_id}.json")
         await file.download_to_drive(json_path)
 
         with open(json_path, "r", encoding="utf-8") as f:
             data = json.load(f)
-
-        # اكتشاف المصدر الحقيقي تلقائياً من الملف نفسه: تصدير Telegram Desktop يضع
-        # في جذر الـ JSON حقل "id" وهو معرّف الشات الداخلي (بدون البادئة -100)،
-        # ونفس الصيغة التي يستخدمها Bot API لأي قناة أو سوبر-كروب هي:
-        # chat_id = -100<id>. هذا يطابق تماماً GROUP_ID و CHANNEL_ID الحاليين،
-        # فنحسب المصدر مباشرة من الملف بدل تخمينه أو الاعتماد على تذكّر الأدمن.
-        auto_detected_source_id = None
-        raw_json_id = data.get("id")
-        if isinstance(raw_json_id, int):
-            auto_detected_source_id = int(f"-100{raw_json_id}")
-
-        if forced_source_chat_id is not None:
-            source_chat_id = forced_source_chat_id
-            source_note = f"مصدر مفروض يدوياً عبر الكابشن: `{source_chat_id}`"
-        elif auto_detected_source_id is not None:
-            source_chat_id = auto_detected_source_id
-            source_note = f"تم اكتشاف المصدر تلقائياً من الملف: `{source_chat_id}`"
-        else:
-            source_chat_id = GROUP_ID
-            source_note = f"تعذّر اكتشاف المصدر من الملف، تم استخدام الكروب (المصدر الوحيد المعتمد) افتراضياً: `{source_chat_id}`"
-
-        try:
-            await status_msg.edit_text(f"🚀 {source_note}\nجاري الأرشفة...", parse_mode="Markdown")
-        except Exception:
-            pass
 
         messages = data.get("messages", [])
         total_msgs = len(messages)
@@ -893,9 +694,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
         text = f"📊 *إحصائيات الأرشيف*\n\nإجمالي الكتب: `{total}`\n\n*حسب المصدر:*\n"
         for chat_id, count in by_source:
-            label = "📚 القناة الرئيسية" if chat_id == CHANNEL_ID else (
-                "👥 الكروب الرئيسي" if chat_id == GROUP_ID else f"👥 كروب ({chat_id})"
-            )
+            label = "📚 القناة الرئيسية" if chat_id == CHANNEL_ID else f"👥 كروب ({chat_id})"
             text += f"• {label}: `{count}`\n"
 
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
@@ -986,210 +785,46 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
 # ==================== الإرسال والبحث ====================
 
-THANK_YOU_MESSAGES = [
-    "📚 تفضّل، أتمنى لك قراءة ممتعة! سعداء دائماً بخدمتك في مجتمع القراءة 🌿",
-    "✨ تم إرسال طلبك، استمتع بالقراءة! نورت مجتمع القراءة 📖",
-    "🌟 تفضّل كتابك، وبالعافية عليك القراءة! نحن هنا دائماً لأجلك 💚",
-    "📖 وصلك الكتاب، قراءة ممتعة إن شاء الله! أهلاً بك دائماً في مجتمعنا 🌸",
-]
-
-
-async def send_book_results(update, context, valid_books, alternates_map=None, core_alternates_map=None):
-    """يرسل الكتب من مصدرها بنسخ (copy_message) بدل التحويل (forward_message) —
-    فلا يظهر 'محوّلة من' على الرسالة الواصلة للطالب. عند فشل الإرسال، يحاول تلقائياً
-    بنسخ بديلة قبل الاستسلام. يُرسل رسالة ودّية بعد النجاح، ويُبلغ الأدمن فوراً بأي
-    كتاب تعذّر توفيره. إن كانت النتائج أكثر من ملف واحد، يعرض زر 'إيقاف الطلب'
-    يستطيع طالب الكتاب (أو الأدمن) الضغط عليه لوقف إرسال الباقي فوراً."""
-    alternates_map = alternates_map or {}
-    core_alternates_map = core_alternates_map or {}
+async def send_book_results(update, context, valid_books):
+    """يرسل الكتب مباشرة (نسخ بدون كابشن، دون إظهار 'محوّلة من القناة').
+    يُرجع (نجح, فشل) — قائمة الكتب التي نجح إرسالها وقائمة التي فشلت مع سبب الفشل،
+    حتى لا يختفي أي خطأ بصمت."""
     succeeded, failed = [], []
-
-    # زر إيقاف الطلب: يظهر فقط عند وجود أكثر من ملف واحد للإرسال (جزء متعدد/عدة نسخ)
-    request_id = None
-    control_msg = None
-    if len(valid_books) > 1:
-        request_id = uuid.uuid4().hex[:10]
-        context.bot_data.setdefault('active_sends', {})[request_id] = {
-            'cancelled': False, 'user_id': update.effective_user.id
-        }
-        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⛔ إيقاف الطلب", callback_data=f"stopreq_{request_id}")]])
+    for book_name, msg_id, source_chat_id in valid_books:
         try:
-            control_msg = await update.message.reply_text(
-                f"⏳ جاري إرسال {len(valid_books)} ملفاً...", reply_markup=keyboard
+            await context.bot.copy_message(
+                chat_id=update.effective_chat.id,
+                from_chat_id=source_chat_id,
+                message_id=msg_id,
+                caption=""
             )
-        except Exception:
-            control_msg = None
-
-    cancelled = False
-    for i, (book_name, msg_id, source_chat_id) in enumerate(valid_books):
-        if request_id:
-            info = context.bot_data.get('active_sends', {}).get(request_id)
-            if info and info.get('cancelled'):
-                cancelled = True
-                break
-
-        key = normalize_arabic(book_name)
-        core_key = get_core_title(book_name)
-
-        candidates = [(msg_id, source_chat_id)]
-        for alt_msg_id, alt_source in alternates_map.get(key, []):
-            if (alt_msg_id, alt_source) not in candidates:
-                candidates.append((alt_msg_id, alt_source))
-        for alt_msg_id, alt_source in core_alternates_map.get(core_key, []):
-            if (alt_msg_id, alt_source) not in candidates:
-                candidates.append((alt_msg_id, alt_source))
-
-        # طبقة أمان أخيرة: بعض الكتب (من استيراد JSON قديم قبل اعتماد الكروب كمصدر
-        # وحيد) قد تكون مخزَّنة برقم رسالة صحيح لكن مصدرها القديم (القناة) لم يعد
-        # مصدراً معتمداً. قبل الاستسلام، جرّب نفس رقم الرسالة من الكروب تحديداً (المصدر
-        # الوحيد المعتمد الآن) إن لم تتم تجربته بعد.
-        if (msg_id, GROUP_ID) not in candidates:
-            candidates.append((msg_id, GROUP_ID))
-
-        last_error = None
-        sent = False
-        for attempt_msg_id, attempt_source in candidates:
-            try:
-                # copy_message بدل forward_message: يرسل نسخة من الملف دون إظهار
-                # "Forwarded from" على الرسالة الواصلة للطالب.
-                await context.bot.copy_message(
-                    chat_id=update.effective_chat.id,
-                    from_chat_id=attempt_source,
-                    message_id=attempt_msg_id
-                )
-                succeeded.append(book_name)
-                sent = True
-                break
-            except Exception as e:
-                last_error = e
-                print(f"⚠️ محاولة فاشلة لـ '{book_name}' (msg_id={attempt_msg_id}, source={attempt_source}): {e}")
-
-        if not sent:
-            failed.append((book_name, msg_id, str(last_error)))
-
-        # تأخير ثابت 0.5 ثانية بين كل ملف والذي يليه (تجنّباً لحدود تيليجرام)، إلا إن
-        # كان هذا آخر عنصر فلا داعي للانتظار بعده
-        if i < len(valid_books) - 1:
-            await asyncio.sleep(0.5)
-
-    if request_id:
-        context.bot_data.get('active_sends', {}).pop(request_id, None)
-        if control_msg:
-            try:
-                if cancelled:
-                    await control_msg.edit_text(f"⛔ تم إيقاف الطلب — أُرسل {len(succeeded)} من {len(valid_books)}.")
-                else:
-                    await control_msg.edit_text(f"✅ تم إرسال {len(succeeded)} ملفاً.")
-            except Exception:
-                pass
-
-    # رسالة ودّية بعد نجاح إرسال كتاب واحد على الأقل
-    if succeeded:
-        try:
-            await update.message.reply_text(random.choice(THANK_YOU_MESSAGES))
-        except Exception:
-            pass
+            succeeded.append(book_name)
+            await asyncio.sleep(0.4)
+        except Exception as e:
+            print(f"⚠️ فشل إرسال الكتاب '{book_name}' (msg_id={msg_id}, source={source_chat_id}): {e}")
+            failed.append((book_name, msg_id, str(e)))
 
     if failed:
         chat_type = update.effective_chat.type
-        requester_user_id = update.effective_user.id
-
-        # إبلاغ فوري لكل الأدمنية بأي كتاب تعذّر توفيره، أياً كان مصدر الطلب
-        requester_name = update.effective_user.full_name or str(requester_user_id)
-        chat_label = "الخاص" if chat_type == 'private' else (update.effective_chat.title or str(update.effective_chat.id))
-        admin_lines = [f"⚠️ تعذّر توفير {len(failed)} كتاب/كتب طُلبت من {chat_label} بواسطة {requester_name}:"]
-        for book_name, msg_id, err in failed:
-            admin_lines.append(f"• {book_name} (msg_id: {msg_id})\n   السبب: {err}")
-        admin_report = "\n".join(admin_lines)
-        for admin_id in ADMIN_IDS:
+        user_id = update.effective_user.id
+        if chat_type == 'private' and user_id in ADMIN_IDS:
+            # تفاصيل كاملة للأدمن في الخاص فقط، لتشخيص السبب بدقة
+            # بدون Markdown: أسماء الكتب الحقيقية شبه دائماً تحتوي رموزاً تكسر التنسيق
+            lines = [f"⚠️ تعذّر إرسال {len(failed)} كتاب/كتب من أصل {len(valid_books)}:"]
+            for book_name, msg_id, err in failed:
+                lines.append(f"• {book_name} (msg_id: {msg_id})\n   السبب: {err}")
             try:
-                await context.bot.send_message(admin_id, admin_report)
+                await update.message.reply_text("\n".join(lines))
             except Exception as e:
-                print(f"❌ تعذّر إبلاغ الأدمن {admin_id}: {e}")
-
-        if not succeeded:
+                print(f"❌ فشل حتى إرسال تقرير الخطأ نفسه: {e}")
+        elif not succeeded:
             # لم ينجح أي كتاب إطلاقاً — يجب أن يعرف طالب الكتاب أن هناك خطأ فعلياً
             await update.message.reply_text(
-                "⚠️ الكتاب موجود في الأرشيف لكن تعذّر توفيره فعلياً حالياً (قد يكون حُذف من مصدره). "
-                "تم إبلاغ الأدمن فوراً وسيُعاد توفيره قريباً بإذن الله."
+                "⚠️ تم العثور على الكتاب في الأرشيف لكن تعذّر إرساله فعلياً (قد يكون حُذف من مصدره). "
+                "تم إبلاغ الأدمن."
             )
 
     return succeeded, failed
-
-
-async def stop_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """يعالج ضغط زر 'إيقاف الطلب' — يوقف إرسال باقي الملفات لهذا الطلب تحديداً.
-    مسموح فقط لصاحب الطلب الأصلي أو لأحد الأدمنية."""
-    query = update.callback_query
-    data = query.data or ""
-    request_id = data.split('_', 1)[1] if '_' in data else None
-    active = context.bot_data.get('active_sends', {})
-    info = active.get(request_id) if request_id else None
-
-    if not info:
-        await query.answer("⏳ انتهى هذا الطلب بالفعل أو تم إرساله بالكامل.", show_alert=True)
-        return
-
-    if query.from_user.id != info.get('user_id') and query.from_user.id not in ADMIN_IDS:
-        await query.answer("هذا الطلب ليس لك.", show_alert=True)
-        return
-
-    info['cancelled'] = True
-    await query.answer("⛔ سيتم إيقاف الطلب بعد الملف الحالي...")
-
-
-async def notify_admins_not_found(context, update, query_text):
-    """يُبلغ كل الأدمنية فوراً باسم الكتاب الذي لم يُعثر عليه، ومصدر الطلب وطالبه"""
-    chat_type = update.effective_chat.type
-    requester_name = update.effective_user.full_name or str(update.effective_user.id)
-    chat_label = "الخاص" if chat_type == 'private' else (update.effective_chat.title or str(update.effective_chat.id))
-    message = f"🔍 طلب كتاب غير متوفر:\n• الطلب: {query_text}\n• من: {chat_label}\n• بواسطة: {requester_name}"
-    for admin_id in ADMIN_IDS:
-        try:
-            await context.bot.send_message(admin_id, message)
-        except Exception as e:
-            print(f"❌ تعذّر إبلاغ الأدمن {admin_id} بكتاب غير موجود: {e}")
-
-
-# جُمَل الطلب الشائعة (تُحذف من بداية الطلب، وقد تتكرر أكثر من جملة واحدة متتالية)
-FILLER_PHRASES = sorted([
-    "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
-    "ابغى", "ابغى كتاب", "ابغى رواية",
-    "ممكن", "ممكن كتاب", "ممكن رواية",
-    "متوفر", "متوفر كتاب", "متوفر رواية",
-    "عايز", "عايز كتاب", "عايز رواية",
-    "عاوز", "عاوز كتاب", "عاوز رواية",
-    "عايزة", "عايزة كتاب", "عايزة رواية",
-    "عاوزة", "عاوزة كتاب", "عاوزة رواية",
-    "هل يوجد", "هل يوجد كتاب", "هل يوجد لديك كتاب", "هل يوجد رواية", "هل يوجد لديك رواية",
-    "هل توجد", "هل توجد لديك", "هل توجد لديك رواية",
-    "اريد رواية", "أريد رواية",
-    "اعطني كتاب", "أعطني كتاب",
-    # صيغ "أحتاج" الدارجة — كانت غير مشمولة سابقاً فتفشل معها كل عمليات البحث
-    "احتاج الى", "احتاج إلى", "أحتاج الى", "أحتاج إلى",
-    "احتاج كتاب", "أحتاج كتاب", "احتاج رواية", "أحتاج رواية",
-    "احتاج", "أحتاج",
-    "بدي كتاب", "بدي رواية", "بدي",
-    "ابي كتاب", "أبي كتاب", "ابي رواية", "أبي رواية", "ابي", "أبي",
-    "لو سمحت", "من فضلك", "ياريت", "لو تكرمت",
-    "اريد", "أريد", "كتاب", "رواية",
-], key=len, reverse=True)
-
-
-def strip_filler_phrases(query_text):
-    """يحذف جملة/كلمة الطلب الشائعة من بداية النص، ويكرر ذلك (وليس مرة واحدة فقط)
-    لأن الطلبات غالباً تحتوي أكثر من جملة زائدة متتالية (مثال: 'من فضلك احتاج كتاب قلبا'
-    يجب أن تُحذف منها 'من فضلك' ثم 'احتاج كتاب' معاً ليبقى 'قلبا' فقط)."""
-    cleaned = query_text
-    changed = True
-    while changed:
-        changed = False
-        for phrase in FILLER_PHRASES:
-            if cleaned.startswith(phrase):
-                cleaned = cleaned[len(phrase):].strip()
-                changed = True
-                break
-    return cleaned
 
 
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1296,7 +931,15 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if is_author_request and author_query:
         norm_query = normalize_arabic(author_query)
     else:
-        clean_query = strip_filler_phrases(clean_query)
+        phrases_to_remove = sorted([
+            "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
+            "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب",
+            "اريد", "أريد", "كتاب", "رواية"
+        ], key=len, reverse=True)
+        for phrase in phrases_to_remove:
+            if clean_query.startswith(phrase):
+                clean_query = clean_query[len(phrase):].strip()
+                break
         if not clean_query:
             clean_query = text
         norm_query = normalize_arabic(clean_query)
@@ -1307,82 +950,40 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     try:
-        records, norm_names, norm_names_no_ext, norm_core_titles, index, core_index = await asyncio.to_thread(get_search_index)
+        records, norm_names, norm_names_no_ext, index = await asyncio.to_thread(get_search_index)
 
         if is_author_request:
-            # وضع "كل كتب الكاتب": بحث احتوائي مقصود وواسع على الاسم الكامل (يشمل اسم المؤلف)
             results = [records[i] for i, nn in enumerate(norm_names) if norm_query in nn]
             if not results:
                 await update.message.reply_text(f"❌ لم يتم العثور على أي كتب باسم الكاتب ('{author_query}').")
-                await notify_admins_not_found(context, update, f"كل كتب: {author_query}")
                 return
-            alternates_map = build_alternates_map(results)
-            core_alternates_map = build_core_alternates_map(results)
-            await send_book_results(update, context, reduce_to_unique_parts(results), alternates_map, core_alternates_map)
+            await send_book_results(update, context, dedupe_exact(results))
             return
 
         results = await asyncio.to_thread(
-            find_book_matches_indexed, norm_query, records, norm_names, norm_names_no_ext, norm_core_titles, core_index
+            find_book_matches_indexed, norm_query, records, norm_names, norm_names_no_ext, index
         )
 
         if not results:
             await update.message.reply_text(
                 f"❌ عذراً، الاسم ('{clean_query}') غير موجود في أرشيف القناة.\n"
-                f"تأكد من كتابة اسم الكتاب بشكل أقرب للعنوان الأصلي.\n"
-                f"تم إبلاغ الأدمن بطلبك ليتم توفيره قريباً بإذن الله."
+                f"تأكد من كتابة اسم الكتاب بشكل أقرب للعنوان الأصلي."
             )
-            await notify_admins_not_found(context, update, clean_query)
             return
 
-        # استكمال بقية أجزاء السلسلة تلقائياً: حتى لو طابق البحث الأساسي جزءاً واحداً فقط
-        # (بسبب اختلاف بسيط في صيغة تسمية باقي الأجزاء)، نجلب أي كتاب آخر يشارك نفس
-        # 'الاسم الأساسي' بعد حذف رقم/اسم الجزء. نتجاهل المسافات في هذه المقارنة تحديداً
-        # (لا في المطابقة العادية) لأن فروقاً بسيطة مثل 'وحرز' مقابل 'و حرز' شائعة جداً
-        # بين رفعات مختلفة لنفس الكتاب ولا يجب أن تمنع ربط أجزائه ببعضها.
-        def loose_series_key(name):
-            return normalize_arabic(strip_part_pattern(name)).replace(' ', '')
+        deduped = dedupe_exact(results)
+        groups = group_into_series(deduped)
 
-        found_base_keys = {loose_series_key(r[0]) for r in results}
-        # طبقة إضافية: نفس "العنوان الجوهري" (بدون اسم المؤلف)، تلتقط أجزاءً قد تختلف
-        # تسميتها عن اسم الجزء الأول بشكل أكبر (مثلاً وصف/مؤلف مختلف مرفق مع كل جزء)
-        found_core_keys = {get_core_title(r[0]).replace(' ', '') for r in results}
+        final_books = []
+        for base_key, items in groups.items():
+            distinct_parts = {extract_part_number(b) for b, _, _ in items if extract_part_number(b) is not None}
+            if len(distinct_parts) >= 2:
+                sorted_items = sorted(items, key=lambda x: (extract_part_number(x[0]) is None, extract_part_number(x[0]) or 0))
+                final_books.extend(sorted_items)
+            else:
+                final_books.append(items[0])
 
-        def _keys_similar(a, b, threshold=0.9):
-            if not a or not b:
-                return False
-            return difflib.SequenceMatcher(None, a, b).ratio() >= threshold
-
-        if found_base_keys or found_core_keys:
-            existing_ids = {(r[1], r[2]) for r in results}
-            for idx, (rec_name, rec_msg, rec_source) in enumerate(records):
-                if (rec_msg, rec_source) in existing_ids:
-                    continue
-                rec_loose = loose_series_key(rec_name)
-                rec_core = get_core_title(rec_name).replace(' ', '')
-                is_match = rec_loose in found_base_keys or rec_core in found_core_keys
-                if not is_match and extract_part_number(rec_name) is not None:
-                    # طبقة أخيرة أكثر تساهلاً: تُستخدم فقط للسجلات التي تحمل رقم جزء
-                    # صريح في اسمها (لذلك شبه مؤكد أنها جزء من كتاب متسلسل)، وتسمح
-                    # بتشابه قوي (90%+) بدل تطابق تام — يلتقط فروقاً بسيطة في كتابة
-                    # اسم الجزء التالي لم تُغطِّها المقارنة الدقيقة أعلاه.
-                    is_match = (
-                        any(_keys_similar(rec_loose, k) for k in found_base_keys)
-                        or any(_keys_similar(rec_core, k) for k in found_core_keys)
-                    )
-                if is_match:
-                    results.append((rec_name, rec_msg, rec_source))
-                    existing_ids.add((rec_msg, rec_source))
-
-        # خريطتا النسخ البديلة (قبل حذف التكرار) — تُستخدمان لإعادة المحاولة تلقائياً
-        # إن فشل إرسال نسخة معيّنة (مثلاً: رسالتها محذوفة من القناة):
-        # 1) بدائل بنفس الاسم تماماً أولاً
-        # 2) ثم كطبقة أخيرة: بدائل بنفس 'العنوان الجوهري' حتى لو اختلف اسم المؤلف/الوصف المرفق
-        alternates_map = build_alternates_map(results)
-        core_alternates_map = build_core_alternates_map(results)
-
-        final_books = reduce_to_unique_parts(results)
-
-        await send_book_results(update, context, final_books, alternates_map, core_alternates_map)
+        await send_book_results(update, context, final_books)
 
     except Exception as e:
         print(f"❌ خطأ في search_and_forward: {e}")
@@ -1396,7 +997,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: 2026-08-20-v12-copy-dedupe-stopbutton")
+    print("🔖 BOT_CODE_VERSION: 2026-08-15-v5-rebuilt-no-userbot")
     print("=" * 60)
 
     init_db()
@@ -1408,12 +1009,11 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("panel", admin_panel))
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^admin_"))
-    application.add_handler(CallbackQueryHandler(stop_request_callback, pattern="^stopreq_"))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
 
     application.add_handler(MessageHandler(
-        filters.ChatType.GROUPS & (filters.Document.ALL | filters.AUDIO | filters.VIDEO),
+        (filters.ChatType.CHANNEL | filters.ChatType.GROUPS) & (filters.Document.ALL | filters.AUDIO | filters.VIDEO),
         handle_new_upload
     ))
     application.add_handler(MessageHandler(
