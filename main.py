@@ -456,10 +456,10 @@ def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext
             return result
 
     if any(len(qw) < 3 for qw in query_words):
-        print(f"🔎 SEARCH[{norm_query!r}] -> كلمة قصيرة موجودة، تشابه أكثر صرامة (95%)")
-        cutoff = 0.95
+        print(f"🔎 SEARCH[{norm_query!r}] -> كلمة قصيرة موجودة، تشابه أكثر صرامة (99%)")
+        cutoff = 0.99
     else:
-        cutoff = 0.85
+        cutoff = 0.99
 
     vocabulary = list(core_index.keys())
     per_word_candidates = []
