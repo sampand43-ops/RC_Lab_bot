@@ -160,9 +160,24 @@ PART_PATTERN = re.compile(
 TRAILING_NUM_PATTERN = re.compile(r'[\s\-_]([0-9٠-٩])\s*(?:\.pdf|\.epub|\.zip)?$')
 
 
+def get_title_line(raw_book_name):
+    """يأخذ السطر الأول فقط من اسم الكتاب المخزَّن.
+    هذا مهم لأن بعض الكتب أُرشفت من رسائل نصية طويلة (كابشن فيه العنوان بالسطر الأول
+    ثم وصف/تفاصيل إضافية بالأسطر التالية) بدل اسم ملف حقيقي بسطر واحد. سابقاً كان
+    اسم الكتاب المخزَّن = النص الكامل بكل أسطره، فكان أي بحث بعنوان دقيق (مثل
+    'الصداقة' أو 'البنت والاسد') يفشل لأن العنوان الكامل المخزَّن لم يكن يساوي أو
+    حتى يحتوي كلمات مطابقة تماماً بسبب الوصف الإضافي الملتصق به. بأخذ السطر الأول
+    فقط عند حساب مفاتيح المطابقة (وليس عند العرض)، يعود العنوان الفعلي مطابقاً."""
+    if not raw_book_name:
+        return raw_book_name
+    first = raw_book_name.split('\n', 1)[0].strip()
+    return first if first else raw_book_name
+
+
 def extract_part_number(filename):
     if not filename:
         return None
+    filename = get_title_line(filename)
     match = PART_PATTERN.search(filename)
     if match:
         val = match.group(2)
@@ -182,6 +197,7 @@ def extract_part_number(filename):
 def strip_part_pattern(filename):
     if not filename:
         return ""
+    filename = get_title_line(filename)
     stripped = PART_PATTERN.sub('', filename)
     stripped = TRAILING_NUM_PATTERN.sub('', stripped)
     stripped = re.sub(r'\.(pdf|epub|zip|mobi|docx?)$', '', stripped, flags=re.IGNORECASE)
@@ -228,8 +244,8 @@ def strip_extension_only(filename):
 
 
 AUTHOR_REQUEST_PATTERNS = [
-    re.compile(r'^(?:اريد|أريد)\s+(?:كل|جميع)\s+(?:كتب|مؤلفات)\s+(.+)$'),
-    re.compile(r'^(?:كل|جميع)\s+(?:كتب|مؤلفات)\s+(.+)$'),
+    re.compile(r'^(?:اريد|أريد|ابغى|عايز|عاوز|عايزة|عاوزة)\s+(?:كل|جميع)\s+(?:كتب|روايات|مؤلفات|اعمال|أعمال|قصص)\s+(.+)$'),
+    re.compile(r'^(?:كل|جميع)\s+(?:كتب|روايات|مؤلفات|اعمال|أعمال|قصص)\s+(.+)$'),
 ]
 FORBIDDEN_PREFIXES = ["صور من", "قصص من", "مختصر", "شرح"]
 
@@ -261,14 +277,17 @@ CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s+[-–—]\s*')
 
 
 def get_core_title(raw_book_name):
-    """يستخرج 'العنوان الجوهري' بحذف كل ما بعد أول شرطة (يليها مسافة)، ثم يحذف الامتداد،
-    ثم يُطبِّع الناتج. يجب استدعاؤها على الاسم الخام (قبل normalize_arabic)، لأن التطبيع
-    يحذف الشرطة نفسها فتفقد إمكانية العثور عليها.
+    """يستخرج 'العنوان الجوهري' بأخذ السطر الأول فقط، ثم حذف كل ما بعد أول شرطة
+    (يليها مسافة)، ثم حذف الامتداد، ثم تطبيع الناتج. يجب استدعاؤها على الاسم الخام
+    (قبل normalize_arabic)، لأن التطبيع يحذف الشرطة نفسها فتفقد إمكانية العثور عليها.
     مثال: 'احببت وغدا - عماد رشاد.pdf' -> 'احببت وغدا'.
     يُستخدم فقط كطبقة احتياطية أخيرة لإعادة المحاولة عند الفشل — وليس للمطابقة
     الأساسية — حتى لا يختلط كتابان مختلفان فعلياً بنفس العنوان الأساسي (مثل
     'فن الحرب' و'فن الحرب - نيكولاس ميكيافيلي' اللذين يُعاملان كنسختين مختلفتين
     عمداً عند الاختيار الأول، لكن كبدائل إعادة محاولة أخيرة هذا مقبول)."""
+    if not raw_book_name:
+        return ""
+    raw_book_name = get_title_line(raw_book_name)
     core_raw = CORE_TITLE_SPLIT_PATTERN.split(raw_book_name, maxsplit=1)[0].strip()
     core_raw = strip_extension_only(core_raw)
     return normalize_arabic(core_raw)
@@ -302,16 +321,20 @@ _search_index_cache = {
 
 def get_search_index():
     """يُرجع (records, norm_names, norm_names_no_ext, norm_core_titles, index, core_index).
-    - norm_names: الاسم الكامل بعد التطبيع (بما فيه الامتداد)، لمرحلة 'يبدأ بـ' (تشمل اسم المؤلف
-      إن وُجد، فيعمل طلب 'العنوان + اسم المؤلف معاً' بشكل صحيح).
-    - norm_names_no_ext: الاسم بعد حذف الامتداد فقط، لمرحلة التطابق التام الأساسية.
-    - norm_core_titles: العنوان الجوهري فقط (بعد حذف '- اسم المؤلف' والامتداد)، يُستخدم في
-      مرحلة تطابق تام إضافية تسمح بطلب العنوان وحده حتى لو كان مخزَّناً مع اسم المؤلف
-      (يعمل حتى مع كلمة واحدة، بأمان، لأنه تطابق تام حصراً وليس احتواءً).
-    - index: فهرس الكلمات من الاسم الكامل (يشمل اسم المؤلف)، لمرحلة 'يبدأ بـ' فقط عبر norm_names
+    - norm_names: السطر الأول من الاسم بعد التطبيع (بما فيه الامتداد إن وُجد ضمنه)، لمرحلة
+      'يبدأ بـ' (تشمل اسم المؤلف إن وُجد، فيعمل طلب 'العنوان + اسم المؤلف معاً' بشكل صحيح).
+    - norm_names_no_ext: السطر الأول بعد حذف الامتداد فقط، لمرحلة التطابق التام الأساسية.
+    - norm_core_titles: العنوان الجوهري فقط (بعد حذف '- اسم المؤلف' والامتداد، من السطر
+      الأول حصراً)، يُستخدم في مرحلة تطابق تام إضافية تسمح بطلب العنوان وحده حتى لو كان
+      مخزَّناً مع اسم المؤلف (يعمل حتى مع كلمة واحدة، بأمان، لأنه تطابق تام حصراً وليس احتواءً).
+    - index: فهرس الكلمات من الاسم الكامل (السطر الأول)، لمرحلة 'يبدأ بـ' فقط عبر norm_names
       (غير مُستخدم مباشرة، محفوظ للتوافق).
     - core_index: فهرس الكلمات من العنوان الجوهري فقط (بدون اسم المؤلف) — يمنع طلب اسم المؤلف
-      وحده (بدون عنوان) من مطابقة كل كتبه عبر مرحلتي 'كل الكلمات' و'التقريبي'."""
+      وحده (بدون عنوان) من مطابقة كل كتبه عبر مرحلتي 'كل الكلمات' و'التقريبي'.
+
+    ملاحظة مهمة: العمل على 'السطر الأول' فقط (عبر get_title_line) بدل النص الكامل المخزَّن
+    يحل مشكلة كتب أُرشفت من رسائل نصية طويلة (كابشن بعدة أسطر: عنوان ثم وصف) والتي كانت
+    تفشل في المطابقة التامة رغم وجودها فعلياً في الأرشيف."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("SELECT COUNT(*), COALESCE(MAX(id), 0) FROM archive")
@@ -333,14 +356,17 @@ def get_search_index():
     core_index = defaultdict(set)
 
     for book_name, msg_id, source_chat_id in raw_records:
-        norm_name = normalize_arabic(book_name)
-        if any(norm_name.startswith(p) for p in norm_forbidden):
+        norm_name_full = normalize_arabic(book_name)
+        if any(norm_name_full.startswith(p) for p in norm_forbidden):
             continue
+
+        title_line = get_title_line(book_name)
+        norm_name = normalize_arabic(title_line)
 
         i = len(records)
         records.append((book_name, msg_id, source_chat_id))
         norm_names.append(norm_name)
-        norm_names_no_ext.append(normalize_arabic(strip_extension_only(book_name)))
+        norm_names_no_ext.append(normalize_arabic(strip_extension_only(title_line)))
         core_title = get_core_title(book_name)
         norm_core_titles.append(core_title)
 
@@ -535,6 +561,27 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
     if not document or not document.file_name.endswith('.json'):
         return
 
+    # حدّ تحميل الملفات عبر Bot API هو 20 ميجابايت بالضبط — وهذا قيد ثابت من تيليجرام
+    # نفسه (خاص بالبوتات فقط، ولا علاقة له بحد الـ 2/4 جيجابايت المسموح للمستخدمين
+    # العاديين)، ولا يمكن تجاوزه إلا بتشغيل "Local Bot API Server" خاص (بنية تحتية
+    # منفصلة تماماً، غير متاحة على Railway بالإعداد الحالي). لذلك نتحقق من الحجم
+    # *قبل* محاولة التحميل أصلاً بدل ترك الخطأ يظهر بشكل مبهم لاحقاً.
+    BOT_API_MAX_DOWNLOAD = 20 * 1024 * 1024
+    if document.file_size and document.file_size > BOT_API_MAX_DOWNLOAD:
+        size_mb = document.file_size / (1024 * 1024)
+        await update.message.reply_text(
+            f"⚠️ الملف حجمه {size_mb:.1f} ميجابايت، وهذا أكبر من الحد الذي يسمح تيليجرام "
+            f"للبوتات (وليس المستخدمين) بتحميله عبر الـ Bot API، وهو *20 ميجابايت فقط* — "
+            f"هذا قيد من تيليجرام نفسه ولا علاقة له بإعدادات البوت أو Railway.\n\n"
+            f"📌 *الحل:* أعد تصدير سجل القناة من Telegram Desktop، وفي نافذة التصدير فعّل "
+            f"خيار *\"Size limit for one file\"* واجعله مثلاً 15 ميجابايت. سيقوم تيليجرام "
+            f"تلقائياً بتقسيم الأرشفة إلى عدة ملفات (result.json, result2.json, ...)، "
+            f"وكل ملف سيكون أصغر من الحد المسموح.\n\n"
+            f"أرسل لي بعدها كل ملف على حدة (واحداً تلو الآخر) وسأؤرشف كل جزء تلقائياً.",
+            parse_mode="Markdown"
+        )
+        return
+
     caption = update.message.caption
     try:
         source_chat_id = int(caption.strip()) if caption else CHANNEL_ID
@@ -546,7 +593,18 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
     try:
-        file = await context.bot.get_file(document.file_id)
+        try:
+            file = await context.bot.get_file(document.file_id)
+        except Exception as e:
+            if "too big" in str(e).lower() or "file is too big" in str(e).lower():
+                await status_msg.edit_text(
+                    "⚠️ الملف أكبر من 20 ميجابايت (الحد الأقصى الذي تسمح به تيليجرام لتحميل "
+                    "الملفات عبر البوتات تحديداً). أعد تصدير الأرشيف مقسّماً لملفات أصغر "
+                    "(خيار \"Size limit for one file\" أثناء التصدير من Telegram Desktop) "
+                    "وأرسلها لي واحداً تلو الآخر."
+                )
+                return
+            raise
         json_path = os.path.join(DATA_DIR, f"temp_export_{update.message.message_id}.json")
         await file.download_to_drive(json_path)
 
@@ -770,7 +828,9 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
         text = f"📊 *إحصائيات الأرشيف*\n\nإجمالي الكتب: `{total}`\n\n*حسب المصدر:*\n"
         for chat_id, count in by_source:
-            label = "📚 القناة الرئيسية" if chat_id == CHANNEL_ID else f"👥 كروب ({chat_id})"
+            label = "📚 القناة الرئيسية" if chat_id == CHANNEL_ID else (
+                "👥 الكروب الرئيسي" if chat_id == GROUP_ID else f"👥 كروب ({chat_id})"
+            )
             text += f"• {label}: `{count}`\n"
 
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
@@ -880,7 +940,7 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
 
     for book_name, msg_id, source_chat_id in valid_books:
         key = normalize_arabic(book_name)
-        core_key = get_core_title(key)
+        core_key = get_core_title(book_name)
 
         candidates = [(msg_id, source_chat_id)]
         for alt_msg_id, alt_source in alternates_map.get(key, []):
@@ -955,6 +1015,47 @@ async def notify_admins_not_found(context, update, query_text):
             await context.bot.send_message(admin_id, message)
         except Exception as e:
             print(f"❌ تعذّر إبلاغ الأدمن {admin_id} بكتاب غير موجود: {e}")
+
+
+# جُمَل الطلب الشائعة (تُحذف من بداية الطلب، وقد تتكرر أكثر من جملة واحدة متتالية)
+FILLER_PHRASES = sorted([
+    "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
+    "ابغى", "ابغى كتاب", "ابغى رواية",
+    "ممكن", "ممكن كتاب", "ممكن رواية",
+    "متوفر", "متوفر كتاب", "متوفر رواية",
+    "عايز", "عايز كتاب", "عايز رواية",
+    "عاوز", "عاوز كتاب", "عاوز رواية",
+    "عايزة", "عايزة كتاب", "عايزة رواية",
+    "عاوزة", "عاوزة كتاب", "عاوزة رواية",
+    "هل يوجد", "هل يوجد كتاب", "هل يوجد لديك كتاب", "هل يوجد رواية", "هل يوجد لديك رواية",
+    "هل توجد", "هل توجد لديك", "هل توجد لديك رواية",
+    "اريد رواية", "أريد رواية",
+    "اعطني كتاب", "أعطني كتاب",
+    # صيغ "أحتاج" الدارجة — كانت غير مشمولة سابقاً فتفشل معها كل عمليات البحث
+    "احتاج الى", "احتاج إلى", "أحتاج الى", "أحتاج إلى",
+    "احتاج كتاب", "أحتاج كتاب", "احتاج رواية", "أحتاج رواية",
+    "احتاج", "أحتاج",
+    "بدي كتاب", "بدي رواية", "بدي",
+    "ابي كتاب", "أبي كتاب", "ابي رواية", "أبي رواية", "ابي", "أبي",
+    "لو سمحت", "من فضلك", "ياريت", "لو تكرمت",
+    "اريد", "أريد", "كتاب", "رواية",
+], key=len, reverse=True)
+
+
+def strip_filler_phrases(query_text):
+    """يحذف جملة/كلمة الطلب الشائعة من بداية النص، ويكرر ذلك (وليس مرة واحدة فقط)
+    لأن الطلبات غالباً تحتوي أكثر من جملة زائدة متتالية (مثال: 'من فضلك احتاج كتاب قلبا'
+    يجب أن تُحذف منها 'من فضلك' ثم 'احتاج كتاب' معاً ليبقى 'قلبا' فقط)."""
+    cleaned = query_text
+    changed = True
+    while changed:
+        changed = False
+        for phrase in FILLER_PHRASES:
+            if cleaned.startswith(phrase):
+                cleaned = cleaned[len(phrase):].strip()
+                changed = True
+                break
+    return cleaned
 
 
 async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1061,15 +1162,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if is_author_request and author_query:
         norm_query = normalize_arabic(author_query)
     else:
-        phrases_to_remove = sorted([
-            "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
-            "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب",
-            "اريد", "أريد", "كتاب", "رواية"
-        ], key=len, reverse=True)
-        for phrase in phrases_to_remove:
-            if clean_query.startswith(phrase):
-                clean_query = clean_query[len(phrase):].strip()
-                break
+        clean_query = strip_filler_phrases(clean_query)
         if not clean_query:
             clean_query = text
         norm_query = normalize_arabic(clean_query)
@@ -1116,13 +1209,18 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return normalize_arabic(strip_part_pattern(name)).replace(' ', '')
 
         found_base_keys = {loose_series_key(r[0]) for r in results}
-        if found_base_keys:
+        # طبقة إضافية: نفس "العنوان الجوهري" (بدون اسم المؤلف)، تلتقط أجزاءً قد تختلف
+        # تسميتها عن اسم الجزء الأول بشكل أكبر (مثلاً وصف/مؤلف مختلف مرفق مع كل جزء)
+        found_core_keys = {get_core_title(r[0]).replace(' ', '') for r in results}
+
+        if found_base_keys or found_core_keys:
             existing_ids = {(r[1], r[2]) for r in results}
             for idx, (rec_name, rec_msg, rec_source) in enumerate(records):
                 if (rec_msg, rec_source) in existing_ids:
                     continue
-                if loose_series_key(rec_name) in found_base_keys:
+                if loose_series_key(rec_name) in found_base_keys or get_core_title(rec_name).replace(' ', '') in found_core_keys:
                     results.append((rec_name, rec_msg, rec_source))
+                    existing_ids.add((rec_msg, rec_source))
 
         # خريطتا النسخ البديلة (قبل حذف التكرار) — تُستخدمان لإعادة المحاولة تلقائياً
         # إن فشل إرسال نسخة معيّنة (مثلاً: رسالتها محذوفة من القناة):
@@ -1174,7 +1272,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: 2026-08-17-v8-group-source-plus-dash-fix")
+    print("🔖 BOT_CODE_VERSION: 2026-08-20-v9-title-line-fix")
     print("=" * 60)
 
     init_db()
