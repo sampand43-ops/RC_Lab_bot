@@ -5,6 +5,7 @@ import re
 import asyncio
 import difflib
 import random
+import uuid
 import urllib.request
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -309,6 +310,37 @@ def group_into_series(records):
         base_key = normalize_arabic(strip_part_pattern(book_name))
         groups[base_key].append((book_name, msg_id, source_chat_id))
     return groups
+
+
+def reduce_to_unique_parts(records):
+    """يحذف النسخ المكررة، ويُبقي نسخة واحدة فقط لكل كتاب لا يحتوي أجزاءً، بينما
+    يُبقي كل الأجزاء المميزة (مرتبة تصاعدياً) للكتب متعددة الأجزاء الفعلية.
+    يُستخدم في كل مسارات الإرسال (بحث عادي + طلب كل كتب مؤلف) لتوحيد السلوك."""
+    deduped = dedupe_exact(records)
+    groups = group_into_series(deduped)
+
+    final_books = []
+    for base_key, items in groups.items():
+        if len(items) >= 2:
+            sorted_items = sorted(items, key=lambda x: extract_part_number(x[0]) or 0)
+            seen_parts = set()
+            seen_unlabeled = False
+            unique_parts = []
+            for item in sorted_items:
+                part_num = extract_part_number(item[0])
+                if part_num is not None:
+                    if part_num in seen_parts:
+                        continue
+                    seen_parts.add(part_num)
+                else:
+                    if seen_unlabeled:
+                        continue
+                    seen_unlabeled = True
+                unique_parts.append(item)
+            final_books.extend(unique_parts)
+        else:
+            final_books.append(items[0])
+    return final_books
 
 
 # ==================== فهرس البحث المُخزَّن مؤقتاً ====================
@@ -963,15 +995,39 @@ THANK_YOU_MESSAGES = [
 
 
 async def send_book_results(update, context, valid_books, alternates_map=None, core_alternates_map=None):
-    """يحوّل الكتب من مصدرها (تظهر 'محوّلة من القناة/الكروب' كما طُلب).
-    عند فشل الإرسال، يحاول تلقائياً بنسخ بديلة (بنفس الاسم تماماً أولاً، ثم بنفس
-    العنوان الجوهري كطبقة أخيرة) قبل الاستسلام. يُرسل رسالة ودّية بعد النجاح،
-    ويُبلغ الأدمن فوراً بأي كتاب تعذّر توفيره."""
+    """يرسل الكتب من مصدرها بنسخ (copy_message) بدل التحويل (forward_message) —
+    فلا يظهر 'محوّلة من' على الرسالة الواصلة للطالب. عند فشل الإرسال، يحاول تلقائياً
+    بنسخ بديلة قبل الاستسلام. يُرسل رسالة ودّية بعد النجاح، ويُبلغ الأدمن فوراً بأي
+    كتاب تعذّر توفيره. إن كانت النتائج أكثر من ملف واحد، يعرض زر 'إيقاف الطلب'
+    يستطيع طالب الكتاب (أو الأدمن) الضغط عليه لوقف إرسال الباقي فوراً."""
     alternates_map = alternates_map or {}
     core_alternates_map = core_alternates_map or {}
     succeeded, failed = [], []
 
-    for book_name, msg_id, source_chat_id in valid_books:
+    # زر إيقاف الطلب: يظهر فقط عند وجود أكثر من ملف واحد للإرسال (جزء متعدد/عدة نسخ)
+    request_id = None
+    control_msg = None
+    if len(valid_books) > 1:
+        request_id = uuid.uuid4().hex[:10]
+        context.bot_data.setdefault('active_sends', {})[request_id] = {
+            'cancelled': False, 'user_id': update.effective_user.id
+        }
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("⛔ إيقاف الطلب", callback_data=f"stopreq_{request_id}")]])
+        try:
+            control_msg = await update.message.reply_text(
+                f"⏳ جاري إرسال {len(valid_books)} ملفاً...", reply_markup=keyboard
+            )
+        except Exception:
+            control_msg = None
+
+    cancelled = False
+    for i, (book_name, msg_id, source_chat_id) in enumerate(valid_books):
+        if request_id:
+            info = context.bot_data.get('active_sends', {}).get(request_id)
+            if info and info.get('cancelled'):
+                cancelled = True
+                break
+
         key = normalize_arabic(book_name)
         core_key = get_core_title(book_name)
 
@@ -994,14 +1050,15 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
         sent = False
         for attempt_msg_id, attempt_source in candidates:
             try:
-                await context.bot.forward_message(
+                # copy_message بدل forward_message: يرسل نسخة من الملف دون إظهار
+                # "Forwarded from" على الرسالة الواصلة للطالب.
+                await context.bot.copy_message(
                     chat_id=update.effective_chat.id,
                     from_chat_id=attempt_source,
                     message_id=attempt_msg_id
                 )
                 succeeded.append(book_name)
                 sent = True
-                await asyncio.sleep(0.4)
                 break
             except Exception as e:
                 last_error = e
@@ -1009,6 +1066,22 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
 
         if not sent:
             failed.append((book_name, msg_id, str(last_error)))
+
+        # تأخير ثابت 0.5 ثانية بين كل ملف والذي يليه (تجنّباً لحدود تيليجرام)، إلا إن
+        # كان هذا آخر عنصر فلا داعي للانتظار بعده
+        if i < len(valid_books) - 1:
+            await asyncio.sleep(0.5)
+
+    if request_id:
+        context.bot_data.get('active_sends', {}).pop(request_id, None)
+        if control_msg:
+            try:
+                if cancelled:
+                    await control_msg.edit_text(f"⛔ تم إيقاف الطلب — أُرسل {len(succeeded)} من {len(valid_books)}.")
+                else:
+                    await control_msg.edit_text(f"✅ تم إرسال {len(succeeded)} ملفاً.")
+            except Exception:
+                pass
 
     # رسالة ودّية بعد نجاح إرسال كتاب واحد على الأقل
     if succeeded:
@@ -1042,6 +1115,27 @@ async def send_book_results(update, context, valid_books, alternates_map=None, c
             )
 
     return succeeded, failed
+
+
+async def stop_request_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يعالج ضغط زر 'إيقاف الطلب' — يوقف إرسال باقي الملفات لهذا الطلب تحديداً.
+    مسموح فقط لصاحب الطلب الأصلي أو لأحد الأدمنية."""
+    query = update.callback_query
+    data = query.data or ""
+    request_id = data.split('_', 1)[1] if '_' in data else None
+    active = context.bot_data.get('active_sends', {})
+    info = active.get(request_id) if request_id else None
+
+    if not info:
+        await query.answer("⏳ انتهى هذا الطلب بالفعل أو تم إرساله بالكامل.", show_alert=True)
+        return
+
+    if query.from_user.id != info.get('user_id') and query.from_user.id not in ADMIN_IDS:
+        await query.answer("هذا الطلب ليس لك.", show_alert=True)
+        return
+
+    info['cancelled'] = True
+    await query.answer("⛔ سيتم إيقاف الطلب بعد الملف الحالي...")
 
 
 async def notify_admins_not_found(context, update, query_text):
@@ -1224,7 +1318,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 return
             alternates_map = build_alternates_map(results)
             core_alternates_map = build_core_alternates_map(results)
-            await send_book_results(update, context, dedupe_exact(results), alternates_map, core_alternates_map)
+            await send_book_results(update, context, reduce_to_unique_parts(results), alternates_map, core_alternates_map)
             return
 
         results = await asyncio.to_thread(
@@ -1286,34 +1380,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         alternates_map = build_alternates_map(results)
         core_alternates_map = build_core_alternates_map(results)
 
-        deduped = dedupe_exact(results)
-        groups = group_into_series(deduped)
-
-        final_books = []
-        for base_key, items in groups.items():
-            if len(items) >= 2:
-                # أكثر من نسخة مختلفة (بعد حذف التكرار الحرفي) تشترك بنفس الاسم الأساسي
-                # بعد حذف رقم الجزء — على الأغلب هي أجزاء/مجلدات لنفس الكتاب، حتى لو لم
-                # يحمل كل عنصر رقم جزء صريحاً في اسمه (مثال: الجزء الثاني مخزَّن بدون
-                # كلمة 'جزء' في اسمه). نُرسلها جميعاً، ونُرتّبها برقم الجزء عند توفره.
-                sorted_items = sorted(
-                    items, key=lambda x: (extract_part_number(x[0]) is None, extract_part_number(x[0]) or 0)
-                )
-                # نحذف التكرار فقط بين عناصر تحمل نفس رقم الجزء الصريح (مثال: جزء 1 مرفوع
-                # مرتين بصيغتين مختلفتين قليلاً) — أما العناصر بلا رقم جزء واضح (None)
-                # فتبقى جميعها، لأننا لا نملك دليلاً على أنها مكررة فعلياً.
-                seen_parts = set()
-                unique_parts = []
-                for item in sorted_items:
-                    part_num = extract_part_number(item[0])
-                    if part_num is not None:
-                        if part_num in seen_parts:
-                            continue
-                        seen_parts.add(part_num)
-                    unique_parts.append(item)
-                final_books.extend(unique_parts)
-            else:
-                final_books.append(items[0])
+        final_books = reduce_to_unique_parts(results)
 
         await send_book_results(update, context, final_books, alternates_map, core_alternates_map)
 
@@ -1329,7 +1396,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: 2026-08-20-v11-group-only-source")
+    print("🔖 BOT_CODE_VERSION: 2026-08-20-v12-copy-dedupe-stopbutton")
     print("=" * 60)
 
     init_db()
@@ -1341,6 +1408,7 @@ def main():
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("panel", admin_panel))
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^admin_"))
+    application.add_handler(CallbackQueryHandler(stop_request_callback, pattern="^stopreq_"))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
 
