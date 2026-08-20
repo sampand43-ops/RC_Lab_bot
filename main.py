@@ -195,6 +195,22 @@ def strip_al(word):
     return word
 
 
+def strip_leading_lam_query(norm_query):
+    """يُرجع نسخة بديلة من الطلب بعد إزالة حرف 'ل' الملتصق ببداية آخر كلمة أو أكثر،
+    لدعم صيغ مثل 'فن الحرب لنيكولاس ميكيافيلي' (حيث يُقصد 'لـ نيكولاس ميكيافيلي').
+    تُستخدم فقط كمحاولة بديلة إضافية بجانب الطلب الأصلي، وليست بديلاً عنه."""
+    words = norm_query.split()
+    changed = False
+    new_words = []
+    for w in words:
+        if len(w) > 3 and w.startswith('ل'):
+            new_words.append(w[1:])
+            changed = True
+        else:
+            new_words.append(w)
+    return ' '.join(new_words) if changed else norm_query
+
+
 def normalize_arabic(text):
     if not text:
         return ""
@@ -227,8 +243,38 @@ def strip_extension_only(filename):
     return EXTENSION_ONLY_PATTERN.sub('', filename).strip()
 
 
+_CAPTION_URL_PATTERN = re.compile(r'https?://\S+|(?:t\.me|telegram\.me)/\S+', re.IGNORECASE)
+_CAPTION_TAG_PATTERN = re.compile(r'[#@]\S+')
+_CAPTION_LEADING_PHRASE_PATTERN = re.compile(
+    r'^\s*[📚📖✨🎉👇⬇️🔥💡]*\s*(تفضل(وا)?\s*(بـ|ب)?\s*(كتاب|رواية)?\s*[:\-–—]?\s*)', re.IGNORECASE
+)
+
+
+def sanitize_caption_derived_name(raw_text, fallback_id):
+    """عندما لا يوجد اسم ملف حقيقي (file_name) ويُضطر الكود لاستخدام نص/كابشن الرسالة كاسم
+    للكتاب، غالباً يكون هذا النص جملة ترويجية كاملة (فيها روابط، هاشتاقات، عبارات مثل
+    'تفضل كتاب:') وليس عنواناً نظيفاً — فيتلوّث فهرس البحث بكلمات عشوائية غير مرتبطة
+    بالكتاب الفعلي، مما يسبب نتائج بحث خاطئة تماماً. هذه الدالة تنظّف النص قدر الإمكان،
+    وإن لم يتبقَّ شيء ذو معنى بعد التنظيف، تستخدم اسماً محايداً بدل النص الملوَّث بالكامل."""
+    if not raw_text:
+        return f"Book_{fallback_id}"
+
+    # خذ السطر الأول فقط — الأسطر التالية في المنشورات الترويجية غالباً روابط/هاشتاقات
+    first_line = raw_text.split("\n")[0].strip()
+    first_line = _CAPTION_URL_PATTERN.sub('', first_line).strip()
+    first_line = _CAPTION_TAG_PATTERN.sub('', first_line).strip()
+    first_line = _CAPTION_LEADING_PHRASE_PATTERN.sub('', first_line).strip()
+
+    # إن أصبح النص فارغاً أو قصيراً جداً بعد التنظيف (لم يكن هناك عنوان حقيقي أصلاً)
+    if len(first_line) < 2:
+        return f"Book_{fallback_id}"
+
+    return first_line
+
+
 AUTHOR_REQUEST_PATTERNS = [
     re.compile(r'^(?:اريد|أريد)\s+(?:كل|جميع)\s+(?:كتب|مؤلفات)\s+(.+)$'),
+    re.compile(r'^(?:اريد|أريد)\s+(?:كتب|مؤلفات)\s+(.+)$'),
     re.compile(r'^(?:كل|جميع)\s+(?:كتب|مؤلفات)\s+(.+)$'),
 ]
 FORBIDDEN_PREFIXES = ["صور من", "قصص من", "مختصر", "شرح"]
@@ -359,35 +405,49 @@ def get_search_index():
 
 def find_book_matches_indexed(norm_query, records, norm_names, norm_names_no_ext, norm_core_titles, core_index):
     """
-    بحث دقيق بأولويات صارمة:
-    1) تطابق تام للاسم الكامل (بعد حذف الامتداد فقط)
-       أو تطابق تام للعنوان الجوهري (بعد حذف '- اسم المؤلف' أيضاً) — يعمل حتى بكلمة واحدة،
-       لأنه تطابق تام حصراً، فيسمح بطلب العنوان وحده حتى لو خُزِّن مع اسم المؤلف
-       (مثال: 'الصداقة' تُطابق 'الصداقة - فلان.pdf').
-    2) (كلمتان فأكثر) الاسم الكامل (بامتداده، ويشمل اسم المؤلف إن وُجد) يبدأ بنص الطلب بالكامل
-       — يسمح بطلب 'العنوان + اسم المؤلف معاً'.
-    3) (كلمتان فأكثر) كل كلمات الطلب موجودة في العنوان الجوهري فقط (بدون اسم المؤلف) —
-       يمنع طلب اسم المؤلف وحده (بدون عنوان) من مطابقة كل كتبه بالخطأ.
-    4) (كلمتان فأكثر، وكل كلمة 3 أحرف فأكثر) تطابق تقريبي صارم على العنوان الجوهري فقط.
+    بحث دقيق بأولويات صارمة، بالترتيب:
+    1أ) تطابق تام للاسم الكامل بعد حذف الامتداد فقط (يشمل اسم المؤلف إن وُجد ضمن الطلب).
+        هذه الأولوية القصوى: تضمن أن طلب 'فن الحرب' يُرجع فقط النسخة التي اسمها
+        'فن الحرب' حرفياً، وليس أي نسخة أخرى تحمل اسم مؤلف إضافياً، حتى لو تشاركا
+        نفس 'العنوان الجوهري'.
+    1ب) فقط إن لم يوجد تطابق 1أ: تطابق تام للعنوان الجوهري (بعد حذف '- اسم المؤلف').
+        يسمح بطلب العنوان وحده حتى لو كان مخزَّناً مع اسم المؤلف فقط (مثال:
+        'الصداقة' تُطابق 'الصداقة - فلان.pdf' إن لم توجد نسخة باسم 'الصداقة' وحده).
+    2) (كلمتان فأكثر) الاسم الكامل يبدأ بنص الطلب بالكامل — يسمح بطلب 'العنوان + المؤلف'.
+    3) (كلمتان فأكثر) كل كلمات الطلب موجودة في العنوان الجوهري فقط (بدون اسم المؤلف).
+    4) (كلمتان فأكثر) تطابق تقريبي صارم على العنوان الجوهري فقط.
+    ملاحظة: يُجرَّب أيضاً استبدال حرف 'ل' الملتصق ببداية أي كلمة (مثل 'لنيكولاس')
+    بإزالته، لدعم صيغ مثل 'فن الحرب لنيكولاس ميكيافيلي'.
     """
+    query_variants = [norm_query]
+    lam_stripped = strip_leading_lam_query(norm_query)
+    if lam_stripped != norm_query:
+        query_variants.append(lam_stripped)
+
+    # 1أ) تطابق تام للاسم الكامل (الأولوية القصوى، بلا أي استثناء)
+    for qv in query_variants:
+        exact_full = [records[i] for i, nn in enumerate(norm_names_no_ext) if nn == qv]
+        if exact_full:
+            print(f"🔎 SEARCH[{norm_query!r}] -> STAGE1a(exact full) -> {[r[0] for r in exact_full]}")
+            return exact_full
+
+    # 1ب) تطابق تام للعنوان الجوهري فقط (لا يُستخدم إلا إن لم يوجد تطابق كامل دقيق)
+    for qv in query_variants:
+        exact_core = [records[i] for i, ct in enumerate(norm_core_titles) if ct == qv]
+        if exact_core:
+            print(f"🔎 SEARCH[{norm_query!r}] -> STAGE1b(exact core only) -> {[r[0] for r in exact_core]}")
+            return exact_core
+
     query_words = get_words(norm_query)
-
-    exact = [
-        records[i] for i, nn in enumerate(norm_names_no_ext)
-        if nn == norm_query or norm_core_titles[i] == norm_query
-    ]
-    if exact:
-        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE1(exact/core) -> {[r[0] for r in exact]}")
-        return exact
-
     if len(query_words) < 2:
         print(f"🔎 SEARCH[{norm_query!r}] -> كلمة واحدة، لا تطابق تام -> فارغ")
         return []
 
-    startswith_matches = [records[i] for i, nn in enumerate(norm_names) if nn.startswith(norm_query)]
-    if startswith_matches:
-        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE2(startswith) -> {[r[0] for r in startswith_matches]}")
-        return startswith_matches
+    for qv in query_variants:
+        startswith_matches = [records[i] for i, nn in enumerate(norm_names) if nn.startswith(qv)]
+        if startswith_matches:
+            print(f"🔎 SEARCH[{norm_query!r}] -> STAGE2(startswith) -> {[r[0] for r in startswith_matches]}")
+            return startswith_matches
 
     word_sets = [core_index.get(qw) for qw in query_words]
     if all(word_sets):
@@ -506,7 +566,7 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not document:
         return
 
-    book_name = document.file_name or message.caption or f"Book_{message.message_id}"
+    book_name = document.file_name or sanitize_caption_derived_name(message.caption, message.message_id)
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
@@ -563,15 +623,21 @@ async def import_json_archive(update: Update, context: ContextTypes.DEFAULT_TYPE
 
         def extract_book_name(msg):
             book_name = msg.get("file_name")
-            if not book_name:
-                text_field = msg.get("text")
-                if isinstance(text_field, list):
-                    book_name = "".join(
-                        part if isinstance(part, str) else part.get("text", "") for part in text_field
-                    ).strip()
-                elif isinstance(text_field, str):
-                    book_name = text_field.strip()
-            return book_name
+            if book_name:
+                return book_name
+            text_field = msg.get("text")
+            if isinstance(text_field, list):
+                raw = "".join(
+                    part if isinstance(part, str) else part.get("text", "") for part in text_field
+                ).strip()
+            elif isinstance(text_field, str):
+                raw = text_field.strip()
+            else:
+                raw = None
+            # لا يوجد اسم ملف حقيقي هنا — النص/الكابشن غالباً جملة ترويجية كاملة
+            # (روابط، هاشتاقات، عبارات مثل 'تفضل كتاب:') وليس عنواناً، فيجب تنظيفه
+            # حتى لا يتلوّث فهرس البحث بكلمات عشوائية تسبب نتائج خاطئة تماماً لاحقاً.
+            return sanitize_caption_derived_name(raw, msg.get("id"))
 
         batch, BATCH_SIZE, processed, last_percent = [], 2000, 0, -1
 
@@ -666,6 +732,7 @@ def build_admin_panel_keyboard():
         [InlineKeyboardButton("📊 إحصائيات الأرشيف", callback_data="admin_stats")],
         [InlineKeyboardButton("📄 تصدير أسماء الكتب (PDF)", callback_data="admin_export_pdf")],
         [InlineKeyboardButton("🔎 بحث خام (تشخيص)", callback_data="admin_raw_search")],
+        [InlineKeyboardButton("🧹 تنظيف أسماء ملوّثة", callback_data="admin_cleanup_names")],
         [InlineKeyboardButton("🔢 حذف آخر عدد من الكتب", callback_data="admin_delete_count")],
         [InlineKeyboardButton("🗑️ حذف كامل الأرشيف", callback_data="admin_clear_all")],
     ])
@@ -849,6 +916,22 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             "(SQL LIKE بدون أي منطق ذكي) لأريك النتائج كما هي مخزّنة فعلياً.",
             parse_mode="Markdown", reply_markup=keyboard
         )
+
+    elif data == "admin_cleanup_names":
+        await query.edit_message_text("⏳ جاري فحص وتنظيف الأسماء الملوّثة في الأرشيف الحالي...")
+        try:
+            updated_count, sample = await asyncio.to_thread(cleanup_poisoned_book_names)
+            text = f"✅ تم فحص الأرشيف وتنظيف {updated_count} اسماً ملوَّثاً (روابط/هاشتاقات/عبارات ترويجية)."
+            if sample:
+                text += "\n\nأمثلة على ما تم تصحيحه:\n" + "\n".join(
+                    f"• قبل: {old}\n   بعد: {new}" for old, new in sample
+                )
+        except Exception as e:
+            text = f"❌ حدث خطأ أثناء التنظيف: {e}"
+
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
+        # بدون Markdown: النصوص الملوّثة نفسها قد تكسر التنسيق
+        await query.message.reply_text(text[:3900], reply_markup=keyboard)
 
     elif data == "admin_back":
         context.user_data.pop('awaiting_delete_count', None)
@@ -1062,10 +1145,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         norm_query = normalize_arabic(author_query)
     else:
         phrases_to_remove = sorted([
-            "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "ابغى", "ابغى كتاب", "ابغى رواية" , "ممكن", "ممكن كتاب", "ممكن رواية", "متوفر", "متوفر كتاب", "متوفر رواية",
-            "عايز", "عايز كتاب", "عايز رواية", "عاوز", "عاوز كتاب", "عاوز رواية", "عايزة", "عايزة كتاب", "عايزة رواية", "عاوزة",
-            "عاوزة كتاب", "عاوزة رواية", "هل يوجد", "هل يوجد كتاب", "هل يوجد لديك كتاب", "هل يوجد لديك كتاب", "هل يوجد رواية"
-            , "هل يوجد لديك رواية", "هل توجد", "هل توجد لديك", "هل توجد لديك رواية" , "أريد كتاب ال",
+            "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
             "اريد رواية", "أريد رواية", "اعطني كتاب", "أعطني كتاب",
             "اريد", "أريد", "كتاب", "رواية"
         ], key=len, reverse=True)
@@ -1175,9 +1255,20 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ==================== التشغيل ====================
 
+BOT_CODE_VERSION = "2026-08-19-v10-exact-priority-lam-fix"
+
+
+async def version_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """يسمح لأي أدمن بمعرفة نسخة الكود الفعلية المُشغَّلة حالياً، مباشرة من تيليجرام
+    (بدون الحاجة لفتح Railway إطلاقاً) — للتأكد القاطع من أن آخر تحديث فعلاً مرفوع ويعمل."""
+    if update.effective_user.id not in ADMIN_IDS:
+        return
+    await update.message.reply_text(f"🔖 نسخة الكود الحالية:\n{BOT_CODE_VERSION}")
+
+
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: 2026-08-17-v8-group-source-plus-dash-fix")
+    print(f"🔖 BOT_CODE_VERSION: {BOT_CODE_VERSION}")
     print("=" * 60)
 
     init_db()
@@ -1188,6 +1279,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("panel", admin_panel))
+    application.add_handler(CommandHandler("version", version_command))
     application.add_handler(CallbackQueryHandler(admin_callback_handler, pattern="^admin_"))
     application.add_handler(MessageHandler(filters.StatusUpdate.NEW_CHAT_MEMBERS, on_added_to_group))
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
