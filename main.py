@@ -371,10 +371,6 @@ def compute_dedup_fields(raw_book_name):
     return dedup_key, part_number
 
 
-AUTHOR_REQUEST_PATTERNS = [
-    re.compile(r'^(?:اريد|أريد|ابغى|عايز|عاوز|عايزة|عاوزة)\s+(?:كل|جميع)\s+(?:كتب|روايات|مؤلفات|اعمال|أعمال|قصص)\s+(.+)$'),
-    re.compile(r'^(?:كل|جميع)\s+(?:كتب|روايات|مؤلفات|اعمال|أعمال|قصص)\s+(.+)$'),
-]
 FORBIDDEN_PREFIXES = ["صور من", "قصص من", "مختصر", "شرح"]
 
 
@@ -600,9 +596,11 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat = update.effective_chat
     if chat is None:
         return
-    # المصدر الوحيد المعتمد للأرشفة التلقائية الآن هو الكروب الرئيسي (وأي كروب آخر
-    # يُضاف ويُعتمد يدوياً عبر allowed_groups).
-    if chat.id != GROUP_ID and not is_group_approved(chat.id):
+    if context.bot_data.get('bot_paused'):
+        return
+    # المصادر المعتمدة للأرشفة التلقائية: الكروب الرئيسي، القناة الرئيسية، وأي
+    # كروب آخر يُضاف ويُعتمد يدوياً عبر allowed_groups.
+    if chat.id not in (GROUP_ID, CHANNEL_ID) and not is_group_approved(chat.id):
         return
 
     document = message.document or message.video or message.audio
@@ -614,6 +612,17 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+
+    # تحقق مسبق: هل يوجد كتاب آخر مؤرشف مسبقاً بنفس (dedup_key, part_number)؟ إن
+    # وُجد واسمه مختلف فعلياً عن الاسم الجديد (وليس فرق تشكيل/فاصلة فقط)، فقد يكون
+    # كتاباً مختلفاً حقيقةً بنفس العنوان بالصدفة (مثال: "المنشق" و"المنشق - مؤلف
+    # آخر") — لا نخسره بصمت، بل نُبلغ الأدمن ليقرر يدوياً.
+    cursor.execute(
+        "SELECT book_name FROM archive WHERE dedup_key = ? AND part_number = ? LIMIT 1",
+        (dedup_key, part_number)
+    )
+    existing_row = cursor.fetchone()
+
     try:
         cursor.execute(
             "INSERT INTO archive (book_name, msg_id, source_chat_id, dedup_key, part_number) VALUES (?, ?, ?, ?, ?)",
@@ -622,10 +631,23 @@ async def handle_new_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
         conn.commit()
         print(f"✅ أُرشف تلقائياً: '{book_name}' (msg_id={message.message_id}, chat={chat.id})")
     except sqlite3.IntegrityError as e:
-        # إما نفس الرسالة أُرشفت من قبل، أو (الحالة الجديدة) نفس الكتاب/الجزء مؤرشف
-        # مسبقاً باسم مختلف قليلاً (تشكيل/فاصلة/اسم مؤلف/رقم نسخة بين قوسين) — كلاهما
-        # يُتجاهل الآن تلقائياً بفضل فهرس UNIQUE(dedup_key, part_number).
         print(f"ℹ️ '{book_name}' مكرر (رسالة أو محتوى) ولم يُخزَّن مرة أخرى: {e}")
+        if existing_row:
+            existing_name = existing_row[0]
+            if normalize_arabic(get_title_line(existing_name)) != normalize_arabic(get_title_line(book_name)):
+                warn_text = (
+                    f"⚠️ *تنبيه: تعارض عناوين محتمل*\n\n"
+                    f"وصل الآن ملف باسم:\n`{book_name}`\n\n"
+                    f"لكن يوجد بالأرشيف مسبقاً كتاب بنفس العنوان الأساسي باسم:\n`{existing_name}`\n\n"
+                    f"لم يُحفظ الملف الجديد لأن البوت اعتبره تكراراً لنفس الكتاب.\n"
+                    f"إن كانا فعلاً *كتابين مختلفين* (نفس العنوان، مؤلف مختلف)، عدّل اسم/كابشن "
+                    f"الملف الجديد ليكون مميزاً أكثر (مثلاً أضف اسم المؤلف بوضوح) وأعد رفعه."
+                )
+                for admin_id in ADMIN_IDS:
+                    try:
+                        await context.bot.send_message(admin_id, warn_text, parse_mode="Markdown")
+                    except Exception:
+                        pass
     except Exception as e:
         print(f"❌ فشلت أرشفة '{book_name}' تلقائياً: {e}")
     finally:
@@ -823,13 +845,16 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ==================== لوحة تحكم الأدمن ====================
 
-def build_admin_panel_keyboard():
+def build_admin_panel_keyboard(paused=False):
+    pause_label = "▶️ تشغيل البوت" if paused else "⏸️ إيقاف البوت مؤقتاً"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 إحصائيات الأرشيف", callback_data="admin_stats")],
+        [InlineKeyboardButton("🔄 تحديث الأرشيف", callback_data="admin_refresh")],
         [InlineKeyboardButton("📄 تصدير أسماء الكتب (PDF)", callback_data="admin_export_pdf")],
         [InlineKeyboardButton("🔎 بحث خام (تشخيص)", callback_data="admin_raw_search")],
         [InlineKeyboardButton("🔢 حذف آخر عدد من الكتب", callback_data="admin_delete_count")],
         [InlineKeyboardButton("🗑️ حذف كامل الأرشيف", callback_data="admin_clear_all")],
+        [InlineKeyboardButton(pause_label, callback_data="admin_toggle_pause")],
     ])
 
 
@@ -837,9 +862,11 @@ async def admin_panel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if update.effective_chat.type != 'private' or user_id not in ADMIN_IDS:
         return
+    paused = bool(context.bot_data.get('bot_paused'))
+    status_line = "\n\n⏸️ *ملاحظة: البوت متوقف مؤقتاً حالياً.*" if paused else ""
     await update.message.reply_text(
-        "⚙️ *لوحة تحكم الأرشيف*\n\nاختر أحد الخيارات:",
-        parse_mode="Markdown", reply_markup=build_admin_panel_keyboard()
+        f"⚙️ *لوحة تحكم الأرشيف*{status_line}\n\nاختر أحد الخيارات:",
+        parse_mode="Markdown", reply_markup=build_admin_panel_keyboard(paused)
     )
 
 
@@ -994,7 +1021,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
         await context.bot.send_message(
             query.message.chat_id, "⚙️ *لوحة تحكم الأرشيف*\n\nاختر أحد الخيارات:",
-            parse_mode="Markdown", reply_markup=build_admin_panel_keyboard()
+            parse_mode="Markdown", reply_markup=build_admin_panel_keyboard(bool(context.bot_data.get('bot_paused')))
         )
 
     elif data == "admin_delete_count":
@@ -1015,12 +1042,72 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             parse_mode="Markdown", reply_markup=keyboard
         )
 
+    elif data == "admin_refresh":
+        # يفرض إعادة بناء فهرس البحث فوراً (بدل انتظار أول عملية بحث)، ويُعيد حساب
+        # dedup_key/part_number لأي سجل وصل بشكل استثنائي بدونهما، ثم يحذف أي تكرار
+        # نتج عن ذلك. ملاحظة مهمة: لا يستطيع البوت "سحب" رسائل قديمة فاتته من
+        # تيليجرام (لا توجد صلاحية كهذه للبوتات) — هذا الزر يُحدّث فقط بناءً على ما
+        # وصل للبوت فعلياً وهو يعمل. لو كتاب رُفع أثناء توقف البوت، الحل هو تصدير
+        # ملف JSON جديد يغطي تلك الفترة واستيراده، أو إعادة رفع الكتاب الآن بعد
+        # تفعيل الأرشفة من القناة والكروب معاً.
+        await query.edit_message_text("🔄 جاري تحديث الأرشيف...")
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*) FROM archive WHERE dedup_key IS NULL")
+            pending = cursor.fetchone()[0]
+            conn.close()
+            if pending > 0:
+                await asyncio.to_thread(_backfill_and_deduplicate, pending)
+            else:
+                await asyncio.to_thread(_ensure_dedup_unique_index)
+            _search_index_cache["fingerprint"] = None  # إجبار إعادة بناء فهرس البحث بالطلب القادم
+            get_search_index()
+
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT COUNT(*), COUNT(DISTINCT dedup_key) FROM archive")
+            total, unique_books = cursor.fetchone()
+            conn.close()
+
+            result_text = (
+                f"✅ *تم تحديث الأرشيف*\n\n"
+                f"إجمالي السجلات الآن: `{total}`\n"
+                f"عدد الكتب الفريدة: `{unique_books}`\n\n"
+                f"ℹ️ ملاحظة: هذا التحديث يعالج فقط ما وصل للبوت فعلياً. إن كان كتاب "
+                f"رُفع أثناء توقف البوت عن العمل، أعد رفعه الآن أو استورد ملف JSON يغطي تلك الفترة."
+            )
+        except Exception as e:
+            result_text = f"❌ خطأ أثناء التحديث:\n`{e}`"
+
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
+        await context.bot.send_message(query.message.chat_id, result_text, parse_mode="Markdown", reply_markup=keyboard)
+
+    elif data == "admin_toggle_pause":
+        currently_paused = bool(context.bot_data.get('bot_paused'))
+        new_state = not currently_paused
+        context.bot_data['bot_paused'] = new_state
+
+        if new_state:
+            # أوقف فوراً أي عمليات إرسال جارية حالياً (مثلاً استخدام خاطئ من عضو)
+            active = context.bot_data.get('active_sends', {})
+            for info in active.values():
+                info['cancelled'] = True
+            status_text = "⏸️ تم *إيقاف البوت* مؤقتاً. أي إرسال جارٍ حالياً سيتوقف خلال لحظات، ولن يستجيب لطلبات الأعضاء العاديين حتى تُعيد تشغيله."
+        else:
+            status_text = "▶️ تم *تشغيل البوت* من جديد، وهو الآن يستقبل طلبات الأعضاء بشكل طبيعي."
+
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
+        await query.edit_message_text(status_text, parse_mode="Markdown", reply_markup=keyboard)
+
     elif data == "admin_back":
         context.user_data.pop('awaiting_delete_count', None)
         context.user_data.pop('awaiting_raw_search', None)
+        paused = bool(context.bot_data.get('bot_paused'))
+        status_line = "\n\n⏸️ *ملاحظة: البوت متوقف مؤقتاً حالياً.*" if paused else ""
         await query.edit_message_text(
-            "⚙️ *لوحة تحكم الأرشيف*\n\nاختر أحد الخيارات:",
-            parse_mode="Markdown", reply_markup=build_admin_panel_keyboard()
+            f"⚙️ *لوحة تحكم الأرشيف*{status_line}\n\nاختر أحد الخيارات:",
+            parse_mode="Markdown", reply_markup=build_admin_panel_keyboard(paused)
         )
 
 
@@ -1366,26 +1453,21 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         return
 
+    # البوت متوقف مؤقتاً من قِبل الأدمن — نصل هنا فقط لما الرسالة موجَّهة فعلاً
+    # للبوت (خاص-أدمن، أو منشن/رد بالكروب)، فلا نُزعج بقية دردشة الكروب العادية
+    if context.bot_data.get('bot_paused') and user_id not in ADMIN_IDS:
+        await update.message.reply_text("🚫 البوت متوقف مؤقتاً حالياً من قِبل الإدارة، يرجى المحاولة لاحقاً.")
+        return
+
     # --- رد ودّي على رسائل الشكر بدل معاملتها كطلب بحث فاشل (ومزعج للأدمن) ---
     if is_gratitude_message(clean_query):
         await update.message.reply_text(random.choice(GRATITUDE_REPLIES))
         return
 
-    # --- استثناء "أريد كل/جميع كتب [الكاتب]" ---
-    is_author_request, author_query = False, None
-    for pattern in AUTHOR_REQUEST_PATTERNS:
-        m = pattern.match(clean_query.strip())
-        if m:
-            is_author_request, author_query = True, m.group(1).strip()
-            break
-
-    if is_author_request and author_query:
-        norm_query = normalize_arabic(author_query)
-    else:
-        clean_query = strip_filler_phrases(clean_query)
-        if not clean_query:
-            clean_query = text
-        norm_query = normalize_arabic(clean_query)
+    clean_query = strip_filler_phrases(clean_query)
+    if not clean_query:
+        clean_query = text
+    norm_query = normalize_arabic(clean_query)
 
     if not norm_query or len(norm_query) < 2:
         if chat_type == 'private':
@@ -1394,16 +1476,6 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     try:
         keys, groups, norm_names, norm_names_no_ext, core_index = await asyncio.to_thread(get_search_index)
-
-        if is_author_request:
-            # وضع "كل كتب الكاتب": بحث احتوائي مقصود وواسع على الاسم التمثيلي (يشمل اسم المؤلف)
-            matched_keys = [keys[i] for i, nn in enumerate(norm_names) if norm_query in nn]
-            if not matched_keys:
-                await update.message.reply_text(f"❌ لم يتم العثور على أي كتب باسم الكاتب ('{author_query}').")
-                await notify_admins_not_found(context, update, f"كل كتب: {author_query}")
-                return
-            await send_book_results(update, context, flatten_matched_keys(matched_keys, groups))
-            return
 
         matched_keys = await asyncio.to_thread(
             find_book_matches_indexed, norm_query, keys, norm_names, norm_names_no_ext, core_index
@@ -1452,7 +1524,7 @@ def main():
     application.add_handler(MessageHandler(filters.StatusUpdate.LEFT_CHAT_MEMBER, on_bot_left_group))
 
     application.add_handler(MessageHandler(
-        filters.ChatType.GROUPS & (filters.Document.ALL | filters.AUDIO | filters.VIDEO),
+        (filters.ChatType.GROUPS | filters.ChatType.CHANNEL) & (filters.Document.ALL | filters.AUDIO | filters.VIDEO),
         handle_new_upload
     ))
     application.add_handler(MessageHandler(
