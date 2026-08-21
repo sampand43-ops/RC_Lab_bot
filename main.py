@@ -122,14 +122,27 @@ def init_db():
             added_by INTEGER
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS bot_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
+        )
+    """)
     conn.commit()
     conn.close()
 
 
+# رقم إصدار خوارزمية dedup_key — يُرفع كل مرة يتغيّر فيها compute_dedup_fields
+# جوهرياً، ليعرف migrate_db أنه يجب إعادة حساب dedup_key لكل السجلات القديمة
+# (وليس فقط الجديدة/الناقصة)، لأن القيم المحسوبة بالخوارزمية القديمة صارت خاطئة.
+DEDUP_ALGO_VERSION = "2"
+
+
 def migrate_db():
-    """يضيف الأعمدة الناقصة لقواعد بيانات قديمة، ثم (لمرة واحدة فقط، إن لزم) يحسب
-    dedup_key و part_number لكل السجلات القديمة، يحذف التكرارات المكتشفة، وأخيراً
-    يُنشئ فهرس UNIQUE يمنع أي تكرار جديد من الدخول للأرشيف من الأساس مستقبلاً."""
+    """يضيف الأعمدة الناقصة لقواعد بيانات قديمة، ثم (لمرة واحدة فقط عند أول إقلاع
+    بعد أي تغيير بخوارزمية dedup_key، أو لأي سجل ناقص المفتاح) يحسب dedup_key و
+    part_number، يحذف التكرارات المكتشفة، وأخيراً يُنشئ فهرس UNIQUE يمنع أي تكرار
+    جديد من الدخول للأرشيف من الأساس مستقبلاً."""
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("PRAGMA table_info(archive)")
@@ -144,6 +157,22 @@ def migrate_db():
     if "part_number" not in columns:
         cursor.execute("ALTER TABLE archive ADD COLUMN part_number INTEGER DEFAULT 0")
         conn.commit()
+    cursor.execute(
+        "CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)"
+    )
+    conn.commit()
+
+    cursor.execute("SELECT value FROM bot_settings WHERE key = 'dedup_algo_version'")
+    row = cursor.fetchone()
+    stored_version = row[0] if row else None
+
+    if stored_version != DEDUP_ALGO_VERSION:
+        # تغيّرت خوارزمية حساب dedup_key — يجب إعادة حسابها لكل السجلات (وليس فقط
+        # الناقصة)، فنمسح القيم القديمة أولاً ونحذف الفهرس القديم قبل إعادة البناء.
+        print(f"🔧 تغيّرت خوارزمية منع التكرار (v{stored_version} -> v{DEDUP_ALGO_VERSION})، إعادة حساب كل السجلات...")
+        cursor.execute("DROP INDEX IF EXISTS idx_archive_dedup")
+        cursor.execute("UPDATE archive SET dedup_key = NULL")
+        conn.commit()
 
     cursor.execute("SELECT COUNT(*) FROM archive WHERE dedup_key IS NULL")
     pending = cursor.fetchone()[0]
@@ -153,6 +182,16 @@ def migrate_db():
         _backfill_and_deduplicate(pending)
     else:
         _ensure_dedup_unique_index()
+
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT INTO bot_settings (key, value) VALUES ('dedup_algo_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (DEDUP_ALGO_VERSION,)
+    )
+    conn.commit()
+    conn.close()
 
 
 def _backfill_and_deduplicate(pending_count):
@@ -347,26 +386,31 @@ def strip_extension_only(filename):
     return EXTENSION_ONLY_PATTERN.sub('', filename).strip()
 
 
-CORE_TITLE_SPLIT_PATTERN = re.compile(r'\s+[-–—]\s*|\s*[-–—]\s+')
-
-
 def compute_dedup_fields(raw_book_name):
     """يحسب (dedup_key, part_number) لكتاب معيّن — يُستدعى مرة واحدة فقط وقت
-    الأرشفة (رفعة جديدة أو استيراد JSON)، وليس عند كل بحث. هذا هو أساس منع
-    التكرار الجديد بالكامل.
+    الأرشفة (رفعة جديدة أو استيراد JSON)، وليس عند كل بحث.
 
-    dedup_key = العنوان الجوهري بعد حذف: علامة رقم النسخة بين قوسين، اسم/رقم
-    الجزء، اسم المؤلف (كل ما بعد أول شرطة)، الامتداد، ثم تطبيع النص (حذف
-    التشكيل والفواصل وتوحيد الحروف). بهذا فإن 'الكتاب.pdf' و'الكتاب (2).pdf'
-    و'الكتاب - المؤلف.pdf' الثلاثة تُعطي نفس dedup_key فتُعتبر نفس الكتاب.
+    dedup_key = السطر الأول من الاسم بعد حذف: علامة رقم النسخة بين قوسين، اسم/رقم
+    الجزء، الامتداد، ثم تطبيع النص (حذف التشكيل والفواصل وتوحيد الحروف). بهذا فإن
+    'الكتاب.pdf' و'الكتاب (2).pdf' (فرق تشكيل/فاصلة/رقم نسخة فقط) يُعتبران نفس
+    الكتاب.
+
+    ملاحظة مهمة: لا نحذف اسم المؤلف (كل ما بعد الشرطة) من dedup_key، خلافاً لإصدار
+    سابق من هذه الدالة. السبب: بعض الملفات مخزَّنة بصيغة 'العنوان - المؤلف' وأخرى
+    بصيغة 'المؤلف - العنوان' (مؤلف أولاً)، ولا توجد طريقة موثوقة لتمييز الصيغتين
+    تلقائياً. حذف 'كل ما بعد أول شرطة' بشكل أعمى كان يحذف العنوان الحقيقي فعلياً
+    في حالة 'المؤلف - العنوان' ويُبقي اسم المؤلف وحده كمفتاح — وهذا بالضبط ما كان
+    يجعل كتابة اسم المؤلف فقط تُطابق وتُرسل كتبه. الاحتفاظ بالسطر كاملاً يحل هذا
+    نهائياً؛ الأثر الجانبي الوحيد هو أن 'الكتاب' و'الكتاب - المؤلف' لم يعودا
+    يُعتبران تكراراً تلقائياً (يُؤرشفان كسجلّين منفصلين إن وصلا فعلاً بصيغتين
+    مختلفتين)، وهذا أفضل من فقدان عنوان كتاب حقيقي أو دمج مؤلف بكل كتبه بالخطأ.
 
     part_number = رقم الجزء الحقيقي إن وُجد صراحة في الاسم (0 يعني لا يوجد جزء).
     'الكتاب الجزء الأول' و'الكتاب الجزء الثاني' يُعطيان نفس dedup_key لكن
     part_number مختلف، فيبقيان سجلّين منفصلين — وهذا هو الاستثناء المطلوب للأجزاء."""
     part_number = extract_part_number(raw_book_name) or 0
-    title_no_part = strip_part_pattern(raw_book_name)  # قد يبقى فيه اسم المؤلف
-    core = CORE_TITLE_SPLIT_PATTERN.split(title_no_part, maxsplit=1)[0].strip()
-    core = strip_extension_only(core)
+    title_no_part = strip_part_pattern(raw_book_name)
+    core = strip_extension_only(title_no_part)
     dedup_key = normalize_arabic(core)
     return dedup_key, part_number
 
@@ -854,6 +898,7 @@ def build_admin_panel_keyboard(paused=False):
         [InlineKeyboardButton("🔎 بحث خام (تشخيص)", callback_data="admin_raw_search")],
         [InlineKeyboardButton("🔢 حذف آخر عدد من الكتب", callback_data="admin_delete_count")],
         [InlineKeyboardButton("🗑️ حذف كامل الأرشيف", callback_data="admin_clear_all")],
+        [InlineKeyboardButton("⛔ إيقاف كل الإرسالات الجارية", callback_data="admin_stop_all_sends")],
         [InlineKeyboardButton(pause_label, callback_data="admin_toggle_pause")],
     ])
 
@@ -1082,6 +1127,18 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
 
         keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
         await context.bot.send_message(query.message.chat_id, result_text, parse_mode="Markdown", reply_markup=keyboard)
+
+    elif data == "admin_stop_all_sends":
+        active = context.bot_data.get('active_sends', {})
+        count = len(active)
+        for info in active.values():
+            info['cancelled'] = True
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
+        if count:
+            text = f"⛔ تم إرسال أمر إيقاف لكل عمليات الإرسال الجارية ({count})، ستتوقف خلال لحظات. البوت يبقى يستقبل طلبات جديدة بشكل طبيعي بعدها."
+        else:
+            text = "ℹ️ لا توجد عمليات إرسال جارية حالياً لإيقافها."
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
     elif data == "admin_toggle_pause":
         currently_paused = bool(context.bot_data.get('bot_paused'))
@@ -1513,7 +1570,11 @@ def main():
     init_db()
     migrate_db()
 
-    application = ApplicationBuilder().token(TOKEN).build()
+    # concurrent_updates=True ضروري: بدونها تعالج المكتبة كل تحديث (رسالة أو ضغطة
+    # زر) بالتسلسل، فأي ضغطة على "إيقاف الطلب" أو "إيقاف البوت" تبقى بالطابور ولا
+    # تُنفَّذ إطلاقاً إلا بعد انتهاء عملية إرسال الكتب الجارية بالكامل — وهذا كان
+    # سبب عدم استجابة الزرّين أثناء الإرسال.
+    application = ApplicationBuilder().token(TOKEN).concurrent_updates(True).build()
 
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
