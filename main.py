@@ -9,6 +9,7 @@ import uuid
 import urllib.request
 from collections import defaultdict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import RetryAfter
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
@@ -466,10 +467,21 @@ def find_book_matches_indexed(norm_query, keys, norm_names, norm_names_no_ext, c
         print(f"🔎 SEARCH[{norm_query!r}] -> كلمة واحدة، لا تطابق تام -> فارغ")
         return []
 
-    startswith_idx = [i for i, nn in enumerate(norm_names) if nn.startswith(norm_query)]
+    # STAGE2: يشترط أن يبدأ الاسم الكامل (يشمل المؤلف) بنص الطلب، *و* أن تتقاطع كلمات
+    # الطلب مع كلمات dedup_key (العنوان فقط، بدون المؤلف). هذا الشرط الإضافي ضروري
+    # لأن بعض الملفات مخزَّنة بصيغة "المؤلف - العنوان" (مؤلف أولاً)، فبدونه كان طلب
+    # يحتوي اسم المؤلف فقط (بدون أي كلمة من العنوان الفعلي) يمرّ من "يبدأ بـ" بالخطأ
+    # ويُرجع كل كتب ذلك المؤلف — وهذا مسموح فقط عبر صيغة "أريد كل كتب/مؤلفات فلان".
+    startswith_idx = []
+    for i, nn in enumerate(norm_names):
+        if not nn.startswith(norm_query):
+            continue
+        key_words = set(get_words(keys[i]))
+        if any(qw in key_words for qw in query_words):
+            startswith_idx.append(i)
     if startswith_idx:
         result = [keys[i] for i in startswith_idx]
-        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE2(startswith) -> {result}")
+        print(f"🔎 SEARCH[{norm_query!r}] -> STAGE2(startswith+title-overlap) -> {result}")
         return result
 
     word_sets = [core_index.get(qw) for qw in query_words]
@@ -1021,13 +1033,65 @@ THANK_YOU_MESSAGES = [
     "📖 وصلك الكتاب، قراءة ممتعة إن شاء الله! أهلاً بك دائماً في مجتمعنا 🌸",
 ]
 
+# --- رد ودّي على رسائل الشكر/المجاملة، بدل معاملتها كطلب بحث فاشل ---
+GRATITUDE_TRIGGERS = [
+    "شكرا", "شكرا لك", "شكرا جزيلا", "شكرا كتير", "شكرا كثير",
+    "اشكرك", "أشكرك", "شكرا الك", "تسلم", "تسلم ايدك", "تسلمي",
+    "يعطيك العافيه", "يعطيك العافية", "الله يعطيك العافيه", "الله يعطيك العافية",
+    "جزاك الله خيرا", "جزاكم الله خيرا", "مشكور", "مشكوره", "مشكورة",
+    "ممنون", "ممنونه", "ممنونة", "تسلمين", "يسلمو",
+]
+GRATITUDE_TRIGGERS_NORM = [normalize_arabic(t) for t in GRATITUDE_TRIGGERS]
+
+GRATITUDE_REPLIES = [
+    "🌿 العفو، وحياك الله! دايماً في خدمتك بمجتمع القراءة 📚",
+    "💚 لا شكر على واجب، تشرفنا نخدمك! قراءة ممتعة 📖",
+    "🌸 العفو يا غالي، أهلاً بيك دائماً 🌟",
+    "✨ حياك الله، ونتمنى لك قراءة ممتعة دائماً! 📚",
+]
+
+
+def is_gratitude_message(clean_query):
+    """يتحقق إن كانت الرسالة مجرد شكر/مجاملة قصيرة (وليست طلب بحث حقيقي يبدأ
+    بكلمة قريبة من 'شكراً' بالصدفة) — نحصر التحقق برسائل قصيرة (6 كلمات فأقل)
+    حتى لا يُساء فهم عنوان كتاب حقيقي طويل يبدأ بكلمة مشابهة."""
+    norm = normalize_arabic(clean_query)
+    if not norm:
+        return False
+    if len(norm.split()) > 6:
+        return False
+    return any(norm == t or norm.startswith(t + ' ') for t in GRATITUDE_TRIGGERS_NORM)
+
+
+def _send_is_cancelled(context, request_id):
+    if not request_id:
+        return False
+    info = context.bot_data.get('active_sends', {}).get(request_id)
+    return bool(info and info.get('cancelled'))
+
+
+async def _wait_or_cancel(context, request_id, seconds):
+    """ينتظر seconds ثانية، لكن يتحقق من ضغط زر 'إيقاف الطلب' كل ثانية بدل الانتظار
+    الأعمى — فلا يبقى الزر عالقاً بلا استجابة أثناء انتظار طويل بسبب تحكم الفيضان.
+    يُرجع False فوراً إن أُلغي الطلب أثناء الانتظار."""
+    waited = 0
+    while waited < seconds:
+        if _send_is_cancelled(context, request_id):
+            return False
+        await asyncio.sleep(1)
+        waited += 1
+    return True
+
+
+MAX_FLOOD_RETRIES = 5
+
 
 async def send_book_results(update, context, valid_books):
     """يرسل الكتب من مصدرها بنسخ (copy_message) بدل التحويل (forward_message) — فلا
-    يظهر 'محوّلة من' على الرسالة الواصلة للطالب. بما أن الأرشيف أصبح خالياً من
-    التكرار من مصدره، فكل عنصر بـ valid_books هو كتاب/جزء فريد فعلياً؛ محاولة
-    الإرسال البديلة الوحيدة المتبقية هي تجربة الكروب الرئيسي كمصدر أخير إن فشلت
-    المحاولة من المصدر الأصلي (لسجلات قديمة قد يكون مصدرها الأصلي تغيّر)."""
+    يظهر 'محوّلة من' على الرسالة الواصلة للطالب، ويُرسَل الملف بدون أي وصف/كابشن
+    أصلي مرفق به. عند اصطدام تيليجرام بحدّ الفيضان (RetryAfter) — وهو ما كان يسبب
+    إرسال بعض الأجزاء فقط أو بترتيب مختلط سابقاً — ننتظر بالضبط المدة التي يطلبها
+    تيليجرام ثم نُعيد إرسال *نفس* الملف (لا ننتقل لملف آخر ونتركه مفقوداً)."""
     succeeded, failed = [], []
 
     request_id = None
@@ -1047,11 +1111,9 @@ async def send_book_results(update, context, valid_books):
 
     cancelled = False
     for i, (book_name, msg_id, source_chat_id) in enumerate(valid_books):
-        if request_id:
-            info = context.bot_data.get('active_sends', {}).get(request_id)
-            if info and info.get('cancelled'):
-                cancelled = True
-                break
+        if _send_is_cancelled(context, request_id):
+            cancelled = True
+            break
 
         candidates = [(msg_id, source_chat_id)]
         if source_chat_id != GROUP_ID:
@@ -1060,18 +1122,39 @@ async def send_book_results(update, context, valid_books):
         last_error = None
         sent = False
         for attempt_msg_id, attempt_source in candidates:
-            try:
-                await context.bot.copy_message(
-                    chat_id=update.effective_chat.id,
-                    from_chat_id=attempt_source,
-                    message_id=attempt_msg_id
-                )
-                succeeded.append(book_name)
-                sent = True
+            attempts_left = MAX_FLOOD_RETRIES
+            while attempts_left > 0:
+                if _send_is_cancelled(context, request_id):
+                    cancelled = True
+                    break
+                try:
+                    await context.bot.copy_message(
+                        chat_id=update.effective_chat.id,
+                        from_chat_id=attempt_source,
+                        message_id=attempt_msg_id,
+                        caption=""  # إزالة أي وصف/كابشن أصلي مرفق بالملف
+                    )
+                    succeeded.append(book_name)
+                    sent = True
+                    break
+                except RetryAfter as e:
+                    wait_time = int(e.retry_after) + 1
+                    print(f"⏳ Flood control لـ '{book_name}': الانتظار {wait_time} ثانية ثم إعادة المحاولة...")
+                    if not await _wait_or_cancel(context, request_id, wait_time):
+                        cancelled = True
+                        break
+                    attempts_left -= 1
+                    last_error = e
+                    continue
+                except Exception as e:
+                    last_error = e
+                    print(f"⚠️ محاولة فاشلة لـ '{book_name}' (msg_id={attempt_msg_id}, source={attempt_source}): {e}")
+                    break
+            if sent or cancelled:
                 break
-            except Exception as e:
-                last_error = e
-                print(f"⚠️ محاولة فاشلة لـ '{book_name}' (msg_id={attempt_msg_id}, source={attempt_source}): {e}")
+
+        if cancelled:
+            break
 
         if not sent:
             failed.append((book_name, msg_id, str(last_error)))
@@ -1283,6 +1366,11 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         return
 
+    # --- رد ودّي على رسائل الشكر بدل معاملتها كطلب بحث فاشل (ومزعج للأدمن) ---
+    if is_gratitude_message(clean_query):
+        await update.message.reply_text(random.choice(GRATITUDE_REPLIES))
+        return
+
     # --- استثناء "أريد كل/جميع كتب [الكاتب]" ---
     is_author_request, author_query = False, None
     for pattern in AUTHOR_REQUEST_PATTERNS:
@@ -1323,8 +1411,8 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
         if not matched_keys:
             await update.message.reply_text(
-                f"❌ عذراً، الاسم ('{clean_query}') غير موجود في أرشيف مجتمع القراءة.\n"
-                f"تأكد من كتابة اسم الكتاب بشكل صحيح.\n"
+                f"❌ عذراً، الاسم ('{clean_query}') غير موجود في أرشيف القناة.\n"
+                f"تأكد من كتابة اسم الكتاب بشكل أقرب للعنوان الأصلي.\n"
                 f"تم إبلاغ الأدمن بطلبك ليتم توفيره قريباً بإذن الله."
             )
             await notify_admins_not_found(context, update, clean_query)
