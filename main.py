@@ -1304,7 +1304,7 @@ async def send_book_results(update, context, valid_books):
             failed.append((book_name, msg_id, str(last_error)))
 
         if i < len(valid_books) - 1:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(1)
 
     if request_id:
         context.bot_data.get('active_sends', {}).pop(request_id, None)
