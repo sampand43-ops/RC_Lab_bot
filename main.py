@@ -128,6 +128,11 @@ def init_db():
             value TEXT
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS blocked_terms (
+            term TEXT PRIMARY KEY
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -159,6 +164,9 @@ def migrate_db():
         conn.commit()
     cursor.execute(
         "CREATE TABLE IF NOT EXISTS bot_settings (key TEXT PRIMARY KEY, value TEXT)"
+    )
+    cursor.execute(
+        "CREATE TABLE IF NOT EXISTS blocked_terms (term TEXT PRIMARY KEY)"
     )
     conn.commit()
 
@@ -899,6 +907,7 @@ def build_admin_panel_keyboard(paused=False):
         [InlineKeyboardButton("🔢 حذف آخر عدد من الكتب", callback_data="admin_delete_count")],
         [InlineKeyboardButton("🗑️ حذف كامل الأرشيف", callback_data="admin_clear_all")],
         [InlineKeyboardButton("⛔ إيقاف كل الإرسالات الجارية", callback_data="admin_stop_all_sends")],
+        [InlineKeyboardButton("🚫 حظر/إلغاء حظر مصطلح بحث", callback_data="admin_block_term")],
         [InlineKeyboardButton(pause_label, callback_data="admin_toggle_pause")],
     ])
 
@@ -1140,10 +1149,31 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
             text = "ℹ️ لا توجد عمليات إرسال جارية حالياً لإيقافها."
         await query.edit_message_text(text, parse_mode="Markdown", reply_markup=keyboard)
 
+    elif data == "admin_block_term":
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("SELECT term FROM blocked_terms ORDER BY term")
+        current = [r[0] for r in cursor.fetchall()]
+        conn.close()
+
+        context.user_data['awaiting_block_term'] = True
+        current_list = ("\n".join(f"• {t}" for t in current)) if current else "(لا يوجد شيء محظور حالياً)"
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("❌ إلغاء", callback_data="admin_back")]])
+        await query.edit_message_text(
+            "🚫 *حظر/إلغاء حظر مصطلح بحث تام*\n\n"
+            "يُستخدم هذا لحالات مثل اسم مؤلف أُرشفت مجموعة كتبه تحت اسمه فقط بدون "
+            "عنوان مميز (فيصير البحث باسمه وحده يُرجع كل كتبه بالغلط). أرسل الآن "
+            "*نفس المصطلح* (مثلاً اسم المؤلف كما يكتبه الأعضاء) — لو كان محظوراً "
+            "سيُلغى حظره، ولو لم يكن سيُحظر.\n\n"
+            f"*المصطلحات المحظورة حالياً:*\n{current_list}",
+            parse_mode="Markdown", reply_markup=keyboard
+        )
+
     elif data == "admin_toggle_pause":
         currently_paused = bool(context.bot_data.get('bot_paused'))
         new_state = not currently_paused
         context.bot_data['bot_paused'] = new_state
+        print(f"⏸️ [PAUSE TOGGLE] bot_paused: {currently_paused} -> {context.bot_data.get('bot_paused')} (by admin {user_id})")
 
         if new_state:
             # أوقف فوراً أي عمليات إرسال جارية حالياً (مثلاً استخدام خاطئ من عضو)
@@ -1160,6 +1190,7 @@ async def admin_callback_handler(update: Update, context: ContextTypes.DEFAULT_T
     elif data == "admin_back":
         context.user_data.pop('awaiting_delete_count', None)
         context.user_data.pop('awaiting_raw_search', None)
+        context.user_data.pop('awaiting_block_term', None)
         paused = bool(context.bot_data.get('bot_paused'))
         status_line = "\n\n⏸️ *ملاحظة: البوت متوقف مؤقتاً حالياً.*" if paused else ""
         await query.edit_message_text(
@@ -1378,6 +1409,21 @@ async def notify_admins_not_found(context, update, query_text):
             print(f"❌ تعذّر إبلاغ الأدمن {admin_id} بكتاب غير موجود: {e}")
 
 
+def is_search_term_blocked(norm_query):
+    """يتحقق إن كان الطلب (مطبَّعاً) محظوراً يدوياً من الأدمن عبر لوحة التحكم —
+    يُستخدم لحالات مثل اسم مؤلف أُرشفت مجموعة كتبه تحت اسمه فقط بدون عنوان مميز
+    (مثال: 'دوستويفسكي')، حيث لا توجد طريقة آلية موثوقة للتفريق بين اسم مؤلف
+    واسم كتاب حقيقي من النص وحده، فيُترك القرار للأدمن حالة بحالة."""
+    if not norm_query:
+        return False
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM blocked_terms WHERE term = ?", (norm_query,))
+    row = cursor.fetchone()
+    conn.close()
+    return bool(row)
+
+
 FILLER_PHRASES = sorted([
     "اريد كتاب", "أريد كتاب", "اريد كتاب ال", "أريد كتاب ال",
     "ابغى", "ابغى كتاب", "ابغى رواية",
@@ -1485,6 +1531,33 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 pass
         return
 
+    # --- استقبال مصطلح الحظر/إلغاء الحظر (من لوحة التحكم) ---
+    if chat_type == 'private' and user_id in ADMIN_IDS and context.user_data.get('awaiting_block_term'):
+        context.user_data.pop('awaiting_block_term', None)
+        keyboard = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 رجوع", callback_data="admin_back")]])
+        term_norm = normalize_arabic(text)
+        if not term_norm:
+            await update.message.reply_text("⚠️ مصطلح غير صالح.", reply_markup=keyboard)
+            return
+        try:
+            conn = sqlite3.connect(DB_PATH)
+            cursor = conn.cursor()
+            cursor.execute("SELECT 1 FROM blocked_terms WHERE term = ?", (term_norm,))
+            exists = cursor.fetchone()
+            if exists:
+                cursor.execute("DELETE FROM blocked_terms WHERE term = ?", (term_norm,))
+                conn.commit()
+                msg = f"✅ تم إلغاء حظر '{text}' — البحث عنه بمفرده سيعمل بشكل طبيعي الآن."
+            else:
+                cursor.execute("INSERT INTO blocked_terms (term) VALUES (?)", (term_norm,))
+                conn.commit()
+                msg = f"🚫 تم حظر '{text}' — لن يُرجع أي نتائج بمفرده بعد الآن (البحث بعنوان كتاب حقيقي يبقى يعمل عادي)."
+            conn.close()
+            await update.message.reply_text(msg, reply_markup=keyboard)
+        except Exception as e:
+            await update.message.reply_text(f"❌ خطأ: {e}", reply_markup=keyboard)
+        return
+
     if text.startswith('/'):
         return
 
@@ -1511,10 +1584,14 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
         return
 
     # البوت متوقف مؤقتاً من قِبل الأدمن — نصل هنا فقط لما الرسالة موجَّهة فعلاً
-    # للبوت (خاص-أدمن، أو منشن/رد بالكروب)، فلا نُزعج بقية دردشة الكروب العادية
-    if context.bot_data.get('bot_paused') and user_id not in ADMIN_IDS:
+    # للبوت (خاص-أدمن، أو منشن/رد بالكروب). يشمل التوقف الأدمن نفسه أيضاً (بلا
+    # استثناء) لأن لوحة التحكم (/panel وأزرارها) معالجات منفصلة تماماً ولا تمرّ من
+    # هنا إطلاقاً، فالأدمن يقدر دائماً يشغّل البوت من جديد رغم هذا التوقف.
+    if context.bot_data.get('bot_paused'):
+        print(f"🚫 [PAUSE ACTIVE] رفض طلب من user_id={user_id} chat={update.effective_chat.id} نص='{clean_query}'")
         await update.message.reply_text("🚫 البوت متوقف مؤقتاً حالياً من قِبل الإدارة، يرجى المحاولة لاحقاً.")
         return
+    print(f"ℹ️ [PAUSE CHECK] bot_paused={context.bot_data.get('bot_paused')} — المتابعة بمعالجة الطلب من user_id={user_id}")
 
     # --- رد ودّي على رسائل الشكر بدل معاملتها كطلب بحث فاشل (ومزعج للأدمن) ---
     if is_gratitude_message(clean_query):
@@ -1529,6 +1606,15 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if not norm_query or len(norm_query) < 2:
         if chat_type == 'private':
             await update.message.reply_text("⚠️ يرجى كتابة اسم كتاب أو كلمة بحث صالحة.")
+        return
+
+    if is_search_term_blocked(norm_query):
+        await update.message.reply_text(
+            f"❌ عذراً، الاسم ('{clean_query}') غير موجود في أرشيف القناة.\n"
+            f"تأكد من كتابة اسم الكتاب بشكل أقرب للعنوان الأصلي.\n"
+            f"تم إبلاغ الأدمن بطلبك ليتم توفيره قريباً بإذن الله."
+        )
+        await notify_admins_not_found(context, update, clean_query)
         return
 
     try:
@@ -1564,7 +1650,7 @@ async def search_and_forward(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 def main():
     print("=" * 60)
-    print("🔖 BOT_CODE_VERSION: 2026-08-21-v13-dedup-at-source")
+    print("🔖 BOT_CODE_VERSION: 2026-08-22-v14-pause-blockterm-fix")
     print("=" * 60)
 
     init_db()
