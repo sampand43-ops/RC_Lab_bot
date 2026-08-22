@@ -1304,7 +1304,7 @@ async def send_book_results(update, context, valid_books):
             failed.append((book_name, msg_id, str(last_error)))
 
         if i < len(valid_books) - 1:
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.75)
 
     if request_id:
         context.bot_data.get('active_sends', {}).pop(request_id, None)
@@ -1398,6 +1398,7 @@ FILLER_PHRASES = sorted([
     "ابي كتاب", "أبي كتاب", "ابي رواية", "أبي رواية", "ابي", "أبي",
     "لو سمحت", "من فضلك", "ياريت", "لو تكرمت",
     "اريد", "أريد", "كتاب", "رواية",
+    "سلسلة","اريد سلسلة",
 ], key=len, reverse=True)
 
 
